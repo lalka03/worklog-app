@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>Учёт работы</title>
+<style>
+  :root{
+    --bg: #f4f6f9; --card: #ffffff; --line: #e5e9f0; --txt: #111827; --muted: #6b7280;
+    --accent: #2563eb; --accent-bg: #eff6ff; --green: #059669; --green-bg: #ecfdf5;
+    --red: #dc2626; --shadow: 0 2px 10px rgba(0,0,0,0.05); --radius: 16px;
+    --track: #e5e9f0;
+  }
+  :root[data-theme="dark"]{
+    --bg: #0f172a; --card: #1e293b; --line: #334155; --txt: #f8fafc; --muted: #94a3b8;
+    --accent: #3b82f6; --accent-bg: #1e3a8a; --green: #10b981; --green-bg: #064e3b;
+    --red: #ef4444; --shadow: 0 2px 10px rgba(0,0,0,0.3); --track: #334155;
+  }
+  :root[data-theme="dark"] input, :root[data-theme="dark"] button { color-scheme: dark; }
+  *{box-sizing:border-box; -webkit-tap-highlight-color: transparent; user-select: none;}
+  html, body{margin:0; padding:0; background:var(--bg); color:var(--txt);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font-size:16px; line-height:1.4; -webkit-font-smoothing: antialiased;}
+  body{padding-bottom: calc(64px + env(safe-area-inset-bottom));}
+
+  /* Header */
+  header{position:sticky; top:0; z-index:20; background:var(--bg);
+    padding: calc(12px + env(safe-area-inset-top)) 16px 12px; display:flex; align-items:center; justify-content:space-between;}
+  header h1{margin:0; font-size:20px; font-weight:800; letter-spacing:-0.5px;}
+  header .sub{font-size:13px; color:var(--muted); font-weight:500; margin-top:2px;}
+  .hdr-actions{display:flex; gap:8px;}
+  .btn-icon{width:40px; height:40px; border-radius:50%; border:none; background:var(--accent-bg); color:var(--accent); display:flex; align-items:center; justify-content:center; cursor:pointer; transition: 0.2s;}
+  .btn-icon:active{transform:scale(0.9);}
+  .btn-icon svg{width:22px; height:22px;}
+
+  main{padding:0 16px 16px;}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:16px; margin-bottom:16px; overflow:hidden;}
+  .card h2{margin:0 0 12px; font-size:16px; font-weight:700; display:flex; align-items:center; gap:8px;}
+  .muted{color:var(--muted); font-size:14px;}
+
+  /* Summary */
+  .summary-card{background:linear-gradient(135deg, var(--accent), #4f8cff); color:#fff; border:none;}
+  :root[data-theme="dark"] .summary-card{background:linear-gradient(135deg, #1d4ed8, #2563eb);}
+  .summary-top{display:flex; align-items:baseline; justify-content:space-between; gap:10px;}
+  .summary-label{font-size:13px; font-weight:600; opacity:0.9;}
+  .summary-sum{font-size:30px; font-weight:800; letter-spacing:-0.5px;}
+  .summary-sub{display:flex; gap:14px; margin-top:8px; font-size:13px; font-weight:600; opacity:0.95;}
+  .progress{height:8px; border-radius:99px; background:rgba(255,255,255,0.25); margin-top:14px; overflow:hidden;}
+  .progress-fill{height:100%; border-radius:99px; background:#fff; transition: width 0.4s;}
+  .summary-meta{margin-top:8px; font-size:12px; opacity:0.9;}
+
+  /* Nav */
+  nav{position:fixed; left:0; right:0; bottom:0; z-index:30; background:var(--card);
+    border-top:1px solid var(--line); display:flex; padding: 8px 8px calc(8px + env(safe-area-inset-bottom));
+    box-shadow: 0 -2px 10px rgba(0,0,0,0.05);}
+  nav button{flex:1; background:none; border:none; padding:8px 4px; font-size:12px; font-weight:600; color:var(--muted);
+    display:flex; flex-direction:column; align-items:center; gap:4px; border-radius:12px; transition: 0.2s;}
+  nav button.active{color:var(--accent);}
+  nav button svg{width:24px; height:24px; transition: 0.2s;}
+
+  /* Buttons & Inputs */
+  .btn{border:none; background:var(--bg); color:var(--txt); border-radius:12px; padding:12px 16px; font-size:15px; font-weight:600; cursor:pointer; transition:0.2s; display:inline-flex; justify-content:center; align-items:center; gap:8px;}
+  .btn.primary{background:var(--accent); color:#fff;}
+  .btn.ghost{background:var(--accent-bg); color:var(--accent);}
+  .btn.danger{background:rgba(220,38,38,0.1); color:var(--red);}
+  .btn:active{transform:scale(0.97);}
+  .btn.grow{flex:1;}
+
+  .input-group{position:relative; margin-bottom:16px;}
+  .input-group input{width:100%; padding:24px 16px 8px; border:2px solid var(--line); border-radius:12px; background:var(--card); color:var(--txt); font-size:16px; font-weight:500; outline:none; transition:0.2s;}
+  .input-group input:focus{border-color:var(--accent);}
+  .input-group label{position:absolute; left:16px; top:16px; font-size:16px; color:var(--muted); pointer-events:none; transition:0.2s;}
+  .input-group input:focus ~ label, .input-group input:not(:placeholder-shown) ~ label{top:6px; font-size:11px; font-weight:700; color:var(--accent); text-transform:uppercase; letter-spacing:0.5px;}
+  .input-group input:not(:focus):not(:placeholder-shown) ~ label{color:var(--muted);}
+
+  .segmented{display:flex; background:var(--bg); border-radius:12px; padding:4px; margin-bottom:16px;}
+  .segmented button{flex:1; border:none; background:transparent; padding:10px; font-size:15px; font-weight:600; color:var(--muted); border-radius:8px; transition:0.2s;}
+  .segmented button.on{background:var(--card); color:var(--txt); box-shadow:0 1px 4px rgba(0,0,0,0.1);}
+
+  .checkbox-row{display:flex; align-items:center; gap:12px; padding:12px; background:var(--bg); border-radius:12px; margin-bottom:16px; cursor:pointer;}
+  .checkbox-row input{width:24px; height:24px; accent-color:var(--accent);}
+  .checkbox-row span{font-size:14px; font-weight:500;}
+
+  /* List */
+  .month-nav{display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; background:var(--card); padding:8px; border-radius:16px; border:1px solid var(--line);}
+  .month-nav button{width:40px; height:40px; border-radius:50%; border:none; background:var(--bg); color:var(--txt); display:flex; align-items:center; justify-content:center; cursor:pointer;}
+  .month-title{font-size:17px; font-weight:700; text-transform:capitalize;}
+
+  .day-list{display:flex; flex-direction:column; gap:8px;}
+  .day-item{display:flex; align-items:center; gap:12px; padding:12px; background:var(--card); border-radius:16px; border:1px solid var(--line); cursor:pointer; transition:0.2s;}
+  .day-item:active{transform:scale(0.98); background:var(--bg);}
+  .day-date{width:48px; height:48px; display:flex; flex-direction:column; align-items:center; justify-content:center; border-radius:12px; background:var(--bg); font-weight:800; font-size:18px; color:var(--txt);}
+  .day-date span{font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase;}
+  .day-info{flex:1; min-width:0;}
+  .day-shift{font-size:15px; font-weight:600; display:flex; align-items:center; gap:6px;}
+  .badge{font-size:11px; padding:2px 6px; border-radius:6px; font-weight:700; text-transform:uppercase;}
+  .badge.s1{background:var(--accent-bg); color:var(--accent);}
+  .badge.s2{background:var(--green-bg); color:var(--green);}
+  .badge.off{background:var(--bg); color:var(--muted);}
+
+  .day-lines{margin-top:4px; font-size:12px; color:var(--muted); font-weight:500; display:flex; flex-direction:column; gap:2px;}
+  .day-lines div{display:flex; justify-content:space-between; align-items:center;}
+  .day-lines .val{font-weight:700; color:var(--txt);}
+
+  /* Totals Table */
+  .table-wrap{overflow-x:auto; margin:0 -16px; padding:0 16px; -webkit-overflow-scrolling:touch;}
+  table{width:100%; border-collapse:collapse; font-size:13px; white-space:nowrap;}
+  th{font-size:11px; color:var(--muted); font-weight:700; text-transform:uppercase; padding:8px 6px; text-align:right; border-bottom:1px solid var(--line);}
+  th:first-child, td:first-child{text-align:left;}
+  td{padding:10px 6px; text-align:right; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums;}
+  tr.total td{font-weight:800; border-bottom:none; border-top:2px solid var(--line); padding-top:12px; padding-bottom:12px;}
+  .chip{display:inline-block; padding:4px 8px; border-radius:8px; background:var(--accent-bg); color:var(--accent); font-size:12px; font-weight:700;}
+
+  /* Form calc */
+  .calc-box{background:var(--bg); border-radius:16px; padding:16px; margin-top:8px; border:1px solid var(--line);}
+  .calc-row{display:flex; justify-content:space-between; align-items:center; padding:6px 0; font-size:14px; font-weight:500;}
+  .calc-row.total{border-top:1px dashed var(--line); margin-top:8px; padding-top:12px; font-size:18px; font-weight:800;}
+  .calc-row b{font-variant-numeric:tabular-nums;}
+
+  .toast{position:fixed; left:50%; bottom:80px; transform:translateX(-50%) translateY(20px);
+    background:var(--txt); color:var(--card); padding:12px 20px; border-radius:12px; font-size:14px; font-weight:600;
+    opacity:0; pointer-events:none; transition:0.3s; z-index:60; box-shadow:0 4px 12px rgba(0,0,0,0.15); white-space:nowrap;}
+  .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
+
+  .modal{position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; z-index:50; align-items:center; justify-content:center; padding:20px; backdrop-filter: blur(2px);}
+  .modal.show{display:flex;}
+  .modal-box{background:var(--card); border-radius:20px; padding:20px; max-width:340px; width:100%;}
+  .modal-box h3{margin:0 0 8px; font-size:18px;}
+  .modal-box p{margin:0 0 20px; font-size:14px; color:var(--muted);}
+</style>
+</head>
+<body>
+
+<header>
+  <div>
+    <h1 id="hTitle">Учёт работы</h1>
+    <div class="sub" id="hSub">Главная</div>
+  </div>
+  <div class="hdr-actions">
+    <button class="btn-icon" id="btnTheme" title="Переключить тему"></button>
+    <button class="btn-icon" id="btnAddToday" title="Добавить на сегодня" style="display:none;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="app"></main>
+
+<nav id="nav">
+  <button data-tab="home" class="active">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+    Главная
+  </button>
+  <button data-tab="totals">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
+    Итоги
+  </button>
+  <button data-tab="settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Настройки
+  </button>
+</nav>
+
+<div class="toast" id="toast"></div>
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <h3 id="mTitle"></h3>
+    <p id="mText"></p>
+    <div style="display:flex; gap:10px;">
+      <button class="btn grow" id="mCancel">Отмена</button>
+      <button class="btn primary grow" id="mOk">ОК</button>
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const LS_KEY = 'worklog.v1';
+const THEME_KEY = 'worklog.theme';
+const DEFAULT_SETTINGS = {
+  th1: 3, th2: 13, coef: 1.5,
+  anchor: '2026-11-13',
+  p1: 3, p2: 3, p3: 3,
+  rates: {1: 280, 2: 322, 3: 350}
+};
+
+let DB = loadDB();
+
+function loadDB(){
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if(!raw) return {settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), days: {}, version: 1};
+    const o = JSON.parse(raw);
+    const s = Object.assign({}, DEFAULT_SETTINGS, o.settings||{});
+    s.rates = Object.assign({1:280,2:322,3:350}, (o.settings&&o.settings.rates)||{});
+    return {settings:s, days: o.days||{}, version:1};
+  }catch(e){
+    return {settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), days:{}, version:1};
+  }
+}
+function saveDB(){ localStorage.setItem(LS_KEY, JSON.stringify(DB)); }
+const clone = o => JSON.parse(JSON.stringify(o));
+
+const WD = ['воскресенье','понедельник','вторник','среда','четверг','пятница','суббота'];
+const WD_SHORT = ['вс','пн','вт','ср','чт','пт','сб'];
+const MONTHS = ['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'];
+
+const pad2 = n => (n<10?'0':'')+n;
+const ymd = d => d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
+const parseYmd = s => { const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); };
+const today = () => { const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); };
+const round2 = x => Math.round((x+Number.EPSILON)*100)/100;
+const fmt2 = x => (isFinite(x)?x:0).toFixed(2).replace('.',',');
+const fmtHours = x => (isFinite(x)?x:0).toFixed(2).replace('.',',');
+const sameDay = (a,b) => a&&b&&a.getFullYear()===b.getFullYear()&&a.getMonth()===b.getMonth()&&a.getDate()===b.getDate();
+const daysInMonth = (y,m) => new Date(y,m+1,0).getDate();
+const lastDayOfMonth = d => new Date(d.getFullYear(), d.getMonth()+1, 0);
+
+function parseTimeToFrac(str){
+  if(!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2}):(\d{1,2})$/);
+  if(!m) return null;
+  const h=Number(m[1]), mi=Number(m[2]);
+  if(h<0||h>23||mi<0||mi>59) return null;
+  return (h*60+mi)/1440;
+}
+
+function shiftByDate(d){
+  const a = parseYmd(DB.settings.anchor);
+  const day1 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diff = Math.round((day1 - a)/86400000);
+  const p1=+DB.settings.p1, p2=+DB.settings.p2, p3=+DB.settings.p3;
+  const cycle=p1+p2+p3;
+  let m = ((diff % cycle) + cycle) % cycle;
+  if(m < p1) return 1;
+  if(m < p1+p2) return 2;
+  return 'off';
+}
+const shiftLabel = s => s===1?'Смена 1':(s===2?'Смена 2':'Выходной');
+const shiftClass = s => s===1?'s1':(s===2?'s2':'off');
+
+function calcBlock(block, smena, isPod){
+  const s = DB.settings;
+  const out = {hours:0, rate:0, earned:0, waitH:0, waitR:0, after:false, valid:false};
+  if(!block) return out;
+  const hours = Number(block.hours);
+  const route = Number(block.route);
+  if(!isFinite(hours) || hours<=0) return out;
+  if(![1,2,3].includes(route)) return out;
+  let rate = Number(s.rates[route]) || 0;
+  if(isPod) rate = round2(rate * (Number(s.coef) || 1));
+  const earned = round2(hours*rate);
+  let waitH=0, waitR=0;
+  const depFr = parseTimeToFrac(block.departure);
+  if(depFr!=null){
+    const th = (smena===1 ? Number(s.th1) : Number(s.th2)) || 0;
+    let over = (depFr - th/24) * 24;
+    if(over < 0) over = 0;
+    waitH = round2(over);
+    waitR = round2(waitH * 0.5 * rate);
+  }
+  out.hours=hours; out.rate=rate; out.earned=earned;
+  out.waitH=waitH; out.waitR=waitR;
+  out.valid=true;
+  out.after = !!block.after;
+  return out;
+}
+
+function calcDay(dayObj){
+  if(!dayObj) return null;
+  const date = parseYmd(dayObj.date);
+  const isLast = sameDay(date, lastDayOfMonth(date));
+  const shift = shiftByDate(date);
+  const isVyh = shift==='off';
+
+  const res = {
+    date: dayObj.date, shift, isVyh,
+    mainCalc: null, podCalc: {s1:null, s2:null},
+    totalHours: 0, totalEarned: 0, totalWaitH: 0, totalWaitR: 0
+  };
+
+  if(!isVyh && dayObj.main && dayObj.main.hours){
+    const c = calcBlock(dayObj.main, shift, false);
+    if(c.valid){ c.after = !!dayObj.main.after && isLast; res.mainCalc = c; }
+  }
+
+  if(isVyh){
+    ['s1','s2'].forEach(k=>{
+      const b = dayObj.pod && dayObj.pod[k];
+      if(b && b.hours){
+        const c = calcBlock(b, k==='s1'?1:2, true);
+        if(c.valid){ c.after = !!b.after && isLast; res.podCalc[k]=c; }
+      }
+    });
+  } else {
+    const b = dayObj.pod && dayObj.pod.s1;
+    if(b && b.hours){
+      const c = calcBlock(b, shift===1?2:1, true);
+      if(c.valid){ c.after = !!b.after && isLast; res.podCalc.s1=c; }
+    }
+  }
+
+  const blocks = [];
+  if(res.mainCalc) blocks.push(res.mainCalc);
+  if(res.podCalc.s1) blocks.push(res.podCalc.s1);
+  if(res.podCalc.s2) blocks.push(res.podCalc.s2);
+  blocks.forEach(c=>{
+    res.totalHours += c.hours;
+    res.totalEarned += c.earned;
+    res.totalWaitH += c.waitH;
+    res.totalWaitR += c.waitR;
+  });
+  res.totalEarned = round2(res.totalEarned);
+  res.totalWaitH = round2(res.totalWaitH);
+  res.totalWaitR = round2(res.totalWaitR);
+  return res;
+}
+
+function accountingMonth(dateStr, after){
+  const d = parseYmd(dateStr);
+  if(after && sameDay(d, lastDayOfMonth(d))){
+    return (d.getMonth()+1===12) ? {y:d.getFullYear()+1, m:0} : {y:d.getFullYear(), m:d.getMonth()+1};
+  }
+  return {y:d.getFullYear(), m:d.getMonth()};
+}
+
+function monthSummary(y, m){
+  let total=0, hours=0, filled=0;
+  const n=daysInMonth(y,m);
+  for(let day=1; day<=n; day++){
+    const d=new Date(y,m,day);
+    const key=ymd(d);
+    const rec=DB.days[key];
+    if(!rec) continue;
+    const c=calcDay(rec);
+    if(!c) continue;
+    if(c.totalHours>0 || c.totalEarned>0){
+      filled++;
+      total += c.totalEarned + c.totalWaitR;
+      hours += c.totalHours;
+    }
+  }
+  return {total:round2(total), hours:round2(hours), filled, days:n};
+}
+
+let state = { tab: 'home', viewYear: today().getFullYear(), viewMonth: today().getMonth(), editDate: null };
+
+function toast(msg){
+  const el=document.getElementById('toast');
+  el.textContent=msg; el.classList.add('show');
+  setTimeout(()=>el.classList.remove('show'), 2000);
+}
+function confirmModal(title, text, okLabel='ОК'){
+  return new Promise(res=>{
+    const m=document.getElementById('modal');
+    document.getElementById('mTitle').textContent=title;
+    document.getElementById('mText').textContent=text;
+    document.getElementById('mOk').textContent=okLabel;
+    m.classList.add('show');
+    const ok=()=>{cleanup(); res(true);};
+    const cancel=()=>{cleanup(); res(false);};
+    function cleanup(){ m.classList.remove('show'); document.getElementById('mOk').removeEventListener('click',ok); document.getElementById('mCancel').removeEventListener('click',cancel); }
+    document.getElementById('mOk').addEventListener('click',ok);
+    document.getElementById('mCancel').addEventListener('click',cancel);
+  });
+}
+
+function setTab(t){
+  state.tab=t; state.editDate=null;
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
+  render(); window.scrollTo({top:0, behavior:'instant'});
+}
+document.getElementById('nav').addEventListener('click', e=>{
+  const b = e.target.closest('button[data-tab]');
+  if(b) setTab(b.dataset.tab);
+});
+document.getElementById('btnAddToday').onclick = () => {
+  state.editDate = ymd(today());
+  render();
+};
+
+function render(){
+  const app = document.getElementById('app');
+  const hTitle = document.getElementById('hTitle');
+  const hSub = document.getElementById('hSub');
+  const btnAdd = document.getElementById('btnAddToday');
+  btnAdd.style.display = 'none';
+
+  if(state.tab==='home' && state.editDate){
+    hTitle.textContent='Заполнить день';
+    hSub.textContent = formatDateLong(parseYmd(state.editDate));
+    app.innerHTML = renderForm(state.editDate);
+    bindForm();
+    return;
+  }
+  if(state.tab==='home'){
+    hTitle.textContent='Главная';
+    hSub.textContent = MONTHS[state.viewMonth]+' '+state.viewYear;
+    btnAdd.style.display = 'flex';
+    app.innerHTML = renderHome();
+    bindHome();
+    return;
+  }
+  if(state.tab==='totals'){
+    hTitle.textContent='Итоги';
+    hSub.textContent='Сводка по месяцам';
+    app.innerHTML = renderTotals();
+    return;
+  }
+  if(state.tab==='settings'){
+    hTitle.textContent='Настройки';
+    hSub.textContent='Параметры и данные';
+    app.innerHTML = renderSettings();
+    bindSettings();
+    return;
+  }
+}
+function formatDateLong(d){ return d.getDate()+' '+MONTHS[d.getMonth()]+' '+d.getFullYear()+' ('+WD[d.getDay()]+')'; }
+
+function renderHome(){
+  const y=state.viewYear, m=state.viewMonth;
+  const n=daysInMonth(y,m);
+  const t=today();
+  const sum=monthSummary(y,m);
+  const pct = sum.days ? Math.round(sum.filled/sum.days*100) : 0;
+
+  let rows='';
+  for(let day=1; day<=n; day++){
+    const d=new Date(y,m,day);
+    const key=ymd(d);
+    const sh=shiftByDate(d);
+    const rec=DB.days[key];
+    let brief='';
+    if(rec){
+      const c=calcDay(rec);
+      if(c){
+        const lines=[];
+        if(c.mainCalc) lines.push(`<div><span>Осн: ${fmtHours(c.mainCalc.hours)} ч</span> <span class="val">${fmt2(c.mainCalc.earned)} ₽</span></div>`);
+        if(c.podCalc.s1) lines.push(`<div><span>Подр: ${fmtHours(c.podCalc.s1.hours)} ч</span> <span class="val">${fmt2(c.podCalc.s1.earned)} ₽</span></div>`);
+        if(c.podCalc.s2) lines.push(`<div><span>Подр2: ${fmtHours(c.podCalc.s2.hours)} ч</span> <span class="val">${fmt2(c.podCalc.s2.earned)} ₽</span></div>`);
+        brief = `<div class="day-lines">${lines.join('')}</div>`;
+      }
+    }
+    const isToday = sameDay(d,t);
+    rows += `
+      <div class="day-item" style="${isToday?'border-color:var(--accent);':''}" data-date="${key}">
+        <div class="day-date" style="${isToday?'background:var(--accent); color:#fff;':''}">${day}<span style="${isToday?'color:rgba(255,255,255,0.8);':''}">${WD_SHORT[d.getDay()]}</span></div>
+        <div class="day-info">
+          <div class="day-shift"><span class="badge ${shiftClass(sh)}">${shiftLabel(sh)}</span></div>
+          ${brief || '<div class="day-lines"><div>Нет записи</div></div>'}
+        </div>
+        <svg viewBox="0 0 24 24" width="20" height="20" stroke="var(--muted)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+      </div>`;
+  }
+
+  return `
+    <div class="card summary-card">
+      <div class="summary-top">
+        <div>
+          <div class="summary-label">Заработано за месяц</div>
+          <div class="summary-sum">${fmt2(sum.total)} ₽</div>
+        </div>
+      </div>
+      <div class="summary-sub">
+        <span>Часы: ${fmtHours(sum.hours)}</span>
+        <span>Записей: ${sum.filled}</span>
+      </div>
+      <div class="progress"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <div class="summary-meta">Заполнено ${sum.filled} из ${sum.days} дней месяца · ${pct}%</div>
+    </div>
+    <div class="month-nav">
+      <button id="prevM"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg></button>
+      <div class="month-title">${MONTHS[m]} ${y}</div>
+      <button id="nextM"><svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg></button>
+    </div>
+    <div class="day-list">${rows}</div>
+  `;
+}
+function bindHome(){
+  document.getElementById('prevM').onclick=()=>{ let m=state.viewMonth-1, y=state.viewYear; if(m<0){m=11;y--;} state.viewMonth=m; state.viewYear=y; render(); };
+  document.getElementById('nextM').onclick=()=>{ let m=state.viewMonth+1, y=state.viewYear; if(m>11){m=0;y++;} state.viewMonth=m; state.viewYear=y; render(); };
+  document.querySelectorAll('.day-item[data-date]').forEach(el=>{
+    el.onclick=()=>{ state.editDate=el.dataset.date; render(); };
+  });
+}
+
+function renderForm(dateStr){
+  const d = parseYmd(dateStr);
+  const sh = shiftByDate(d);
+  const isVyh = sh==='off';
+  const rec = DB.days[dateStr] || {date:dateStr, main:{}, pod:{s1:{}, s2:{}}};
+  const isLast = sameDay(d, lastDayOfMonth(d));
+  const m = rec.main||{}, p1 = (rec.pod&&rec.pod.s1)||{}, p2 = (rec.pod&&rec.pod.s2)||{};
+  const mirror = isVyh ? 0 : (sh===1?2:1);
+
+  let mainHtml='';
+  if(!isVyh){
+    mainHtml = `
+      <div class="card">
+        <h2>Основная работа <span class="badge s1">${shiftLabel(sh)}</span></h2>
+        ${fieldHours('m_hours', m.hours)}
+        ${fieldRoute('m_route', m.route)}
+        ${fieldDeparture('m_dep', m.departure)}
+        ${(isLast && sh===2) ? fieldAfter('m_after', m.after) : ''}
+      </div>`;
+  }
+
+  let podHtml = '';
+  if(isVyh){
+    podHtml = `
+      <div class="card">
+        <h2>Подработка <span class="badge s1">Смена 1</span></h2>
+        ${fieldHours('p1_hours', p1.hours)}
+        ${fieldRoute('p1_route', p1.route)}
+        ${fieldDeparture('p1_dep', p1.departure)}
+        ${isLast ? fieldAfter('p1_after', p1.after) : ''}
+      </div>
+      <div class="card">
+        <h2>Подработка <span class="badge s2">Смена 2</span></h2>
+        ${fieldHours('p2_hours', p2.hours)}
+        ${fieldRoute('p2_route', p2.route)}
+        ${fieldDeparture('p2_dep', p2.departure)}
+        ${isLast ? fieldAfter('p2_after', p2.after) : ''}
+      </div>`;
+  } else {
+    podHtml = `
+      <div class="card">
+        <h2>Подработка <span class="badge s2">${shiftLabel(mirror)}</span></h2>
+        ${fieldHours('p1_hours', p1.hours)}
+        ${fieldRoute('p1_route', p1.route)}
+        ${fieldDeparture('p1_dep', p1.departure)}
+        ${(isLast && mirror===2) ? fieldAfter('p1_after', p1.after) : ''}
+      </div>`;
+  }
+
+  return `
+    <div style="display:flex; gap:8px; margin-bottom:16px;">
+      <button class="btn grow" id="backBtn" style="justify-content:flex-start; padding-left:12px;">
+        <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg> Назад
+      </button>
+      <button class="btn danger" id="clearBtn">Очистить</button>
+    </div>
+    ${mainHtml}
+    ${podHtml}
+    <div class="card">
+      <h2>Расчёт за день</h2>
+      <div id="calcBox"></div>
+    </div>
+    <button class="btn primary grow" id="saveBtn" style="width:100%; padding:16px; font-size:16px; margin-bottom:24px;">Сохранить</button>
+  `;
+}
+
+function fieldHours(id,val){
+  return `<div class="input-group"><input id="${id}" type="number" inputmode="decimal" min="0" max="24" step="0.5" placeholder=" " value="${val!==undefined&&val!==null?val:''}"><label>Часы</label></div>`;
+}
+function fieldRoute(id,val){
+  const v = String(val||'');
+  return `<div class="segmented" id="${id}">
+    ${[1,2,3].map(n=>`<button type="button" data-v="${n}" class="${v===String(n)?'on':''}">Рейс ${n}</button>`).join('')}
+  </div>`;
+}
+function fieldDeparture(id,val){
+  return `<div class="input-group"><input id="${id}" type="time" placeholder=" " value="${val||''}"><label>Выезд</label></div>`;
+}
+function fieldAfter(id,val){
+  return `<label class="checkbox-row"><input id="${id}" type="checkbox" ${val?'checked':''}><span>После (перенести смену в след. месяц)</span></label>`;
+}
+
+function bindForm(){
+  const dateStr = state.editDate;
+  document.getElementById('backBtn').onclick=()=>{ state.editDate=null; render(); };
+  document.getElementById('clearBtn').onclick=async()=>{
+    if(await confirmModal('Очистить день?','Запись будет удалена.','Удалить')){
+      delete DB.days[dateStr]; saveDB(); state.editDate=null; render(); toast('День очищен');
+    }
+  };
+  document.querySelectorAll('.segmented').forEach(seg=>{
+    seg.addEventListener('click', e=>{
+      const b=e.target.closest('button[data-v]'); if(!b) return;
+      seg.querySelectorAll('button').forEach(x=>x.classList.toggle('on', x===b));
+      updateCalc();
+    });
+  });
+  ['m_hours','m_route','m_dep','m_after','p1_hours','p1_route','p1_dep','p1_after','p2_hours','p2_route','p2_dep','p2_after']
+    .forEach(id=>{ const el=document.getElementById(id); if(el){ el.addEventListener('input', updateCalc); el.addEventListener('change', updateCalc); } });
+  document.getElementById('saveBtn').onclick=saveForm;
+  updateCalc();
+}
+
+function readSeg(id){
+  const seg=document.getElementById(id);
+  return seg && seg.querySelector('button.on') ? seg.querySelector('button.on').dataset.v : '';
+}
+function collectForm(){
+  const dateStr=state.editDate;
+  const sh=shiftByDate(parseYmd(dateStr));
+  const isVyh=sh==='off';
+  const obj={date:dateStr, main:{}, pod:{s1:{}, s2:{}}};
+  const g=id=>document.getElementById(id);
+  if(!isVyh){
+    obj.main.hours=g('m_hours').value; obj.main.route=readSeg('m_route'); obj.main.departure=g('m_dep').value;
+    if(g('m_after')) obj.main.after=g('m_after').checked;
+  }
+  obj.pod.s1.hours=g('p1_hours').value; obj.pod.s1.route=readSeg('p1_route'); obj.pod.s1.departure=g('p1_dep').value;
+  if(g('p1_after')) obj.pod.s1.after=g('p1_after').checked;
+  if(isVyh){
+    obj.pod.s2.hours=g('p2_hours').value; obj.pod.s2.route=readSeg('p2_route'); obj.pod.s2.departure=g('p2_dep').value;
+    if(g('p2_after')) obj.pod.s2.after=g('p2_after').checked;
+  }
+  return obj;
+}
+
+function updateCalc(){
+  const obj=collectForm();
+  const c=calcDay(obj);
+  const box=document.getElementById('calcBox');
+  if(!c){ box.innerHTML='<div class="muted">нет данных</div>'; return; }
+  let html='';
+  function blockHtml(title, calc){
+    return `<div style="margin-bottom:12px;">
+      <div class="calc-row" style="color:var(--muted); font-size:12px; text-transform:uppercase; font-weight:700;">${title}</div>
+      <div class="calc-row"><span>Часы × ставка</span><b>${fmtHours(calc.hours)} × ${fmt2(calc.rate)} = ${fmt2(calc.earned)} ₽</b></div>
+      <div class="calc-row"><span>Ожидание</span><b>${fmtHours(calc.waitH)} ч = ${fmt2(calc.waitR)} ₽</b></div>
+    </div>`;
+  }
+  if(c.mainCalc) html += blockHtml('Основная работа', c.mainCalc);
+  if(c.podCalc.s1) html += blockHtml(c.isVyh ? 'Подработка (Смена 1)' : 'Подработка', c.podCalc.s1);
+  if(c.podCalc.s2) html += blockHtml('Подработка (Смена 2)', c.podCalc.s2);
+  if(!html) html='<div class="muted">Введите данные для расчёта</div>';
+
+  const total = round2(c.totalEarned + c.totalWaitR);
+  html += `
+    <div class="calc-row"><span>Часы всего</span><b>${fmtHours(c.totalHours)}</b></div>
+    <div class="calc-row"><span>Заработано</span><b>${fmt2(c.totalEarned)} ₽</b></div>
+    <div class="calc-row"><span>Ожидание</span><b>${fmtHours(c.totalWaitH)} ч = ${fmt2(c.totalWaitR)} ₽</b></div>
+    <div class="calc-row total"><span>Итого за день</span><span style="color:var(--green);">${fmt2(total)} ₽</span></div>
+  `;
+  box.innerHTML=html;
+}
+
+function saveForm(){
+  const obj=collectForm();
+  const hasMain = obj.main.hours && Number(obj.main.hours)>0 && obj.main.route;
+  const hasP1 = obj.pod.s1.hours && Number(obj.pod.s1.hours)>0 && obj.pod.s1.route;
+  const hasP2 = obj.pod.s2.hours && Number(obj.pod.s2.hours)>0 && obj.pod.s2.route;
+
+  if(!hasMain && !hasP1 && !hasP2){
+    delete DB.days[obj.date]; saveDB(); state.editDate=null; render(); toast('Пустой день удалён'); return;
+  }
+  if(!hasMain) delete obj.main;
+  if(!hasP1) delete obj.pod.s1;
+  if(!hasP2) delete obj.pod.s2;
+
+  DB.days[obj.date]=obj; saveDB(); state.editDate=null; render(); toast('Сохранено');
+}
+function aggregate(){
+  const map = new Map();
+  function ensure(y,m){
+    const k=y+'-'+m;
+    if(!map.has(k)) map.set(k,{y,m,hMain:0,earnMain:0,wHMain:0,wRMain:0,hPod:0,earnPod:0,wHPod:0,wRPod:0});
+    return map.get(k);
+  }
+  Object.values(DB.days).forEach(day=>{
+    if(!day || !day.date) return;
+    const c=calcDay(day);
+    if(!c) return;
+    const d=parseYmd(day.date);
+    const isLast = sameDay(d, lastDayOfMonth(d));
+
+    if(c.mainCalc){
+      const acct = accountingMonth(day.date, c.mainCalc.after && isLast);
+      const r=ensure(acct.y,acct.m);
+      r.hMain += c.mainCalc.hours; r.earnMain += c.mainCalc.earned; r.wHMain += c.mainCalc.waitH; r.wRMain += c.mainCalc.waitR;
+    }
+    if(c.podCalc.s1){
+      const acct = accountingMonth(day.date, c.podCalc.s1.after && isLast);
+      const r=ensure(acct.y,acct.m);
+      r.hPod += c.podCalc.s1.hours; r.earnPod += c.podCalc.s1.earned; r.wHPod += c.podCalc.s1.waitH; r.wRPod += c.podCalc.s1.waitR;
+    }
+    if(c.podCalc.s2){
+      const acct = accountingMonth(day.date, c.podCalc.s2.after && isLast);
+      const r=ensure(acct.y,acct.m);
+      r.hPod += c.podCalc.s2.hours; r.earnPod += c.podCalc.s2.earned; r.wHPod += c.podCalc.s2.waitH; r.wRPod += c.podCalc.s2.waitR;
+    }
+  });
+  return Array.from(map.values()).map(r=>({
+    ...r,
+    hMain:round2(r.hMain), earnMain:round2(r.earnMain), wHMain:round2(r.wHMain), wRMain:round2(r.wRMain),
+    hPod:round2(r.hPod), earnPod:round2(r.earnPod), wHPod:round2(r.wHPod), wRPod:round2(r.wRPod),
+    total: round2(r.earnMain + r.wRMain + r.earnPod + r.wRPod)
+  })).sort((a,b)=> a.y===b.y ? a.m-b.m : a.y-b.y);
+}
+
+function renderTotals(){
+  const list=aggregate();
+  if(!list.length) return `<div class="card" style="text-align:center; padding:40px 16px;"><div class="muted">Пока нет данных для отображения.<br>Заполните дни на Главной.</div></div>`;
+
+  const grand = list.reduce((acc,r)=>{
+    acc.hMain+=r.hMain; acc.earnMain+=r.earnMain; acc.wHMain+=r.wHMain; acc.wRMain+=r.wRMain;
+    acc.hPod+=r.hPod; acc.earnPod+=r.earnPod; acc.wHPod+=r.wHPod; acc.wRPod+=r.wRPod; acc.total+=r.total;
+    return acc;
+  },{hMain:0,earnMain:0,wHMain:0,wRMain:0,hPod:0,earnPod:0,wHPod:0,wRPod:0,total:0});
+
+  let rows='';
+  list.forEach(r=>{
+    rows+=`<tr>
+      <td><b>${MONTHS[r.m].slice(0,3)} ${String(r.y).slice(2)}</b></td>
+      <td>${fmtHours(r.hMain)}</td>
+      <td>${fmt2(r.earnMain)}</td>
+      <td>${fmtHours(r.wHMain)} / ${fmt2(r.wRMain)}</td>
+      <td>${fmtHours(r.hPod)}</td>
+      <td>${fmt2(r.earnPod)}</td>
+      <td>${fmtHours(r.wHPod)} / ${fmt2(r.wRPod)}</td>
+      <td style="color:var(--green); font-weight:700;">${fmt2(r.total)}</td>
+    </tr>`;
+  });
+  const gt = round2(grand.total);
+  rows+=`<tr class="total">
+      <td>Итого</td>
+      <td>${fmtHours(grand.hMain)}</td>
+      <td>${fmt2(grand.earnMain)}</td>
+      <td>${fmtHours(grand.wHMain)} / ${fmt2(grand.wRMain)}</td>
+      <td>${fmtHours(grand.hPod)}</td>
+      <td>${fmt2(grand.earnPod)}</td>
+      <td>${fmtHours(grand.wHPod)} / ${fmt2(grand.wRPod)}</td>
+      <td style="color:var(--green);">${fmt2(gt)}</td>
+    </tr>`;
+
+  return `
+    <div class="card" style="padding:0; overflow:hidden;">
+      <div style="padding:16px; border-bottom:1px solid var(--line); background:var(--accent-bg);">
+        <div class="muted" style="color:var(--accent); font-weight:600;">Общая сумма за всё время</div>
+        <div style="font-size:28px; font-weight:800; color:var(--accent);">${fmt2(gt)} ₽</div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Мес</th>
+              <th>Ч.осн</th>
+              <th>Зар.осн</th>
+              <th>Ожид.осн</th>
+              <th>Ч.подр</th>
+              <th>Зар.подр</th>
+              <th>Ожид.подр</th>
+              <th>Итого</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+    <div class="muted" style="text-align:center; font-size:12px; margin-top:16px;">Ожидание показано как: часы / рубли</div>
+  `;
+}
+
+function renderSettings(){
+  const s=DB.settings;
+  return `
+    <div class="card">
+      <h2>График смен</h2>
+      <div class="input-group"><input id="set_anchor" type="date" placeholder=" " value="${s.anchor}"><label>Якорная дата (День 1)</label></div>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
+        <div class="input-group"><input id="set_p1" type="number" placeholder=" " value="${s.p1}"><label>См. 1 (дн)</label></div>
+        <div class="input-group"><input id="set_p2" type="number" placeholder=" " value="${s.p2}"><label>См. 2 (дн)</label></div>
+        <div class="input-group"><input id="set_p3" type="number" placeholder=" " value="${s.p3}"><label>Вых (дн)</label></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Тарифы и пороги</h2>
+      <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px;">
+        <div class="input-group"><input id="set_r1" type="number" placeholder=" " value="${s.rates[1]}"><label>Рейс 1 (₽)</label></div>
+        <div class="input-group"><input id="set_r2" type="number" placeholder=" " value="${s.rates[2]}"><label>Рейс 2 (₽)</label></div>
+        <div class="input-group"><input id="set_r3" type="number" placeholder=" " value="${s.rates[3]}"><label>Рейс 3 (₽)</label></div>
+      </div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px;">
+        <div class="input-group"><input id="set_th1" type="number" step="0.1" placeholder=" " value="${s.th1}"><label>Порог См.1 (ч)</label></div>
+        <div class="input-group"><input id="set_th2" type="number" step="0.1" placeholder=" " value="${s.th2}"><label>Порог См.2 (ч)</label></div>
+      </div>
+      <div class="input-group"><input id="set_coef" type="number" step="0.1" placeholder=" " value="${s.coef}"><label>Коэф. подработки</label></div>
+      <button class="btn primary grow" id="set_save" style="width:100%;">Сохранить настройки</button>
+    </div>
+
+    <div class="card">
+      <h2>Управление данными</h2>
+      <div class="muted" style="margin-bottom:12px;">Сохранено дней: ${Object.keys(DB.days).length}</div>
+      <div style="display:flex; flex-direction:column; gap:10px;">
+        <button class="btn ghost" id="expBtn">Экспорт резервной копии (.json)</button>
+        <button class="btn ghost" id="impBtn">Импорт из файла</button>
+        <button class="btn danger" id="wipeBtn">Удалить все данные</button>
+      </div>
+      <input id="impFile" type="file" accept=".json" style="display:none">
+    </div>
+  `;
+}
+
+function bindSettings(){
+  document.getElementById('set_save').onclick=()=>{
+    const g=id=>document.getElementById(id);
+    DB.settings = {
+      th1:Number(g('set_th1').value), th2:Number(g('set_th2').value), coef:Number(g('set_coef').value),
+      anchor:g('set_anchor').value, p1:Number(g('set_p1').value), p2:Number(g('set_p2').value), p3:Number(g('set_p3').value),
+      rates:{1:Number(g('set_r1').value), 2:Number(g('set_r2').value), 3:Number(g('set_r3').value)}
+    };
+    saveDB(); toast('Настройки сохранены'); render();
+  };
+  document.getElementById('expBtn').onclick=()=>{
+    const blob = new Blob([JSON.stringify({settings:DB.settings, days:DB.days}, null, 2)], {type:'application/json'});
+    const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='worklog_backup.json'; a.click();
+  };
+  document.getElementById('impBtn').onclick=()=>document.getElementById('impFile').click();
+  document.getElementById('impFile').onchange=async (e)=>{
+    const f=e.target.files[0]; if(!f) return;
+    const txt = await f.text();
+    try{ const obj=JSON.parse(txt); if(!obj.days) throw 0;
+      if(await confirmModal('Импорт','Текущие данные будут заменены.','Заменить')){
+        DB = {settings:Object.assign({}, DEFAULT_SETTINGS, obj.settings||{}), days:obj.days};
+        saveDB(); toast('Импортировано'); render();
+      }
+    }catch(err){ toast('Ошибка файла'); }
+  };
+  document.getElementById('wipeBtn').onclick=async ()=>{
+    if(await confirmModal('Удалить всё?','Все записи будут стёрты безвозвратно.','Удалить')){
+      localStorage.removeItem(LS_KEY); DB = loadDB(); toast('Данные удалены'); render();
+    }
+  };
+}
+
+/* Theme */
+function getSystemDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
+function applyTheme(t){
+  document.documentElement.dataset.theme = t;
+  const btn = document.getElementById('btnTheme');
+  if(!btn) return;
+  btn.innerHTML = t==='dark'
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+}
+function initTheme(){
+  let t = localStorage.getItem(THEME_KEY);
+  if(!t) t = getSystemDark() ? 'dark' : 'light';
+  localStorage.setItem(THEME_KEY, t);
+  applyTheme(t);
+}
+document.getElementById('btnTheme').onclick = () => {
+  const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+  localStorage.setItem(THEME_KEY, cur);
+  applyTheme(cur);
+};
+
+(function init(){
+  initTheme();
+  render();
+})();
+</script>
+</body>
+</html>

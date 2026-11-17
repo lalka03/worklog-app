@@ -1,0 +1,15 @@
+{
+  "name": "worklog-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Учёт работы — нативное приложение на Capacitor",
+  "scripts": {
+    "cap:add": "cap add android",
+    "cap:sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/cli": "^6.0.0"
+  }
+}
