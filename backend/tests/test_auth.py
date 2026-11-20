@@ -161,11 +161,20 @@ class AuthTest(unittest.TestCase):
                                             "192.0.2.100")["user"], employee["user"])
 
     def test_rate_limit_by_ip_across_email_addresses(self):
-        for index in range(10):
+        self.assert_error("invalid_credentials", 401, self.service.login,
+                          "first@example.test", "short", "192.0.2.1")
+        self.now += 1
+        for index in range(99):
             self.assert_error("invalid_credentials", 401, self.service.login,
-                              f"missing{index}@example.test", PASSWORD, "192.0.2.1")
+                              f"missing{index}@example.test", "short", "192.0.2.1")
+        self.now += 15 * 60 - 2
         self.assert_error("rate_limited", 429, self.service.login,
-                          "another@example.test", PASSWORD, "192.0.2.1")
+                          "another@example.test", "short", "192.0.2.1")
+        self.now += 1
+        self.assert_error("invalid_credentials", 401, self.service.login,
+                          "another@example.test", "short", "192.0.2.1")
+        self.assert_error("rate_limited", 429, self.service.login,
+                          "last@example.test", "short", "192.0.2.1")
 
     def test_no_secret_in_records(self):
         invite = self.service.create_invite(self.owner)

@@ -29,7 +29,8 @@ REFRESH_SECONDS = 7 * 24 * 60 * 60
 INVITE_SECONDS = 7 * 24 * 60 * 60
 RESET_SECONDS = 60 * 60
 RATE_WINDOW = 15 * 60
-RATE_MAX = 10
+RATE_IP_MAX = 100
+RATE_EMAIL_MAX = 10
 MAX_WORKLOG_BYTES = 512 * 1024
 EMPLOYEE_PAGE_SIZE = 3
 MAX_REVISION = 2**53 - 1
@@ -377,19 +378,19 @@ class Service:
 
     def charge_auth_attempt(self, ip, *, scope="", email=None):
         namespace = scope + ":" if scope else ""
-        keys = [security.digest(namespace + "ip:" + _source_ip(ip))]
+        limits = [(security.digest(namespace + "ip:" + _source_ip(ip)), RATE_IP_MAX)]
         normalized_email = security.normalize_email(email)
         if normalized_email is not None:
-            keys.append(security.digest(namespace + "email:" + normalized_email))
+            limits.append((security.digest(namespace + "email:" + normalized_email), RATE_EMAIL_MAX))
 
         def charge(tx):
             now = self._now()
             updates = []
-            for key in keys:
+            for key, limit in limits:
                 row = tx.get_rate_bin(key)
                 history = row.attempts if row else ()
                 attempts = tuple(attempt for attempt in history if attempt > now - RATE_WINDOW)
-                if len(attempts) >= RATE_MAX:
+                if len(attempts) >= limit:
                     raise DomainError("rate_limited", 429)
                 updates.append(RateBin(key, (*attempts, now), now + RATE_WINDOW))
             for rate_bin in updates:

@@ -220,15 +220,59 @@ class HttpTest(unittest.TestCase):
                                   {"error": "invalid_session"})
 
     def test_auth_limit_uses_gateway_source_ip(self):
-        for attempt in range(10):
+        for attempt in range(100):
             forwarded = {"x-forwarded-for": f"198.51.100.{attempt + 1}", "x-real-ip": f"203.0.113.{attempt + 1}"}
             body = {"email": f"try-{attempt}@example.test", "password": "short", "invite": "bad"}
             self.assert_reply(self.request("POST", "/auth/register", body, headers=forwarded),
                               422, {"error": "invalid_password"})
         self.assert_reply(self.request("POST", "/auth/register", body, headers={"x-forwarded-for": "198.51.100.200"}),
                           429, {"error": "rate_limited"})
+        self.assert_reply(self.request("POST", "/auth/login", {"email": body["email"], "password": "short"}),
+                          401, {"error": "invalid_credentials"})
         self.assert_reply(self.request("POST", "/auth/register", body, ip=None, headers=forwarded),
                           401, {"error": "invalid_credentials"})
+
+    def test_shared_ip_pilot_registers_and_signs_in_fifty_employees(self):
+        expected = {}
+        for index in range(50):
+            email = f"pilot-{index}@example.test"
+            invite = self.assert_reply(self.request("POST", "/admin/invites", {}, token=ADMIN_TOKEN), 200)
+            credentials = {"email": email, "password": PASSWORD}
+            registered = self.assert_reply(self.request("POST", "/auth/register", {
+                **credentials, "invite": invite["code"],
+            }), 200)
+            self.assertEqual(registered["user"]["role"], "employee")
+            logged_in = self.assert_reply(self.request("POST", "/auth/login", credentials), 200)
+            self.assertEqual(logged_in["user"], registered["user"])
+            uid = logged_in["user"]["uid"]
+            token = logged_in["accessToken"]
+            data = snapshot(str(index + 1))
+            saved = self.assert_reply(self.request("PUT", "/me/worklog", {
+                "data": data, "expectedRevision": 0, "mutationId": "pilot-save",
+            }, token=token), 200)
+            self.assertEqual(saved["revision"], 1)
+            expected[uid] = {"profile": {"email": email}, "worklog": data}
+
+        self.assertEqual(len(expected), 50)
+        self.assert_reply(self.request("GET", "/me/worklog", token=token), 200,
+                          {"data": data, "revision": 1})
+        self.assert_reply(self.request("GET", "/admin/employees", token=token),
+                          403, {"error": "forbidden"})
+
+        expected[self.admin.uid] = {"profile": {"email": self.admin.email}, "worklog": None}
+        expected[self.staff.uid] = {"profile": {"email": self.staff.email}, "worklog": None}
+        seen = {}
+        cursor = ""
+        for _ in range(len(expected)):
+            page = self.assert_reply(self.request("GET", "/admin/employees", token=ADMIN_TOKEN,
+                                                  query={"cursor": cursor}), 200)
+            self.assertFalse(seen.keys() & page["users"].keys())
+            seen.update(page["users"])
+            cursor = page.get("nextCursor")
+            if cursor is None:
+                break
+        self.assertIsNone(cursor)
+        self.assertEqual(seen, expected)
 
     def test_store_unavailability_is_generic(self):
         with patch.object(self.store, "run_read", side_effect=StoreUnavailable("connection secret")):
