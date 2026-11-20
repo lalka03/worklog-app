@@ -1,4 +1,4 @@
 argon2-cffi==25.1.0
 ydb==3.22.0
-# The YDB metadata credential provider imports requests at runtime.
+# The application's YDB metadata credential provider imports requests at runtime.
 requests==2.34.2

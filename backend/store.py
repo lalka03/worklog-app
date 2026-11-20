@@ -1,7 +1,7 @@
 """Typed transactional storage for the Worklog backend."""
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Callable, Protocol, TypeVar
 
 import ydb
@@ -85,6 +85,17 @@ class AuditEvent:
     created_at: int
 
 
+# This allowlist also defines the logical backup format and scan order.
+BACKUP_TABLES = {
+    "accounts": (Account, ("uid",)),
+    "invitations": (Invitation, ("digest",)),
+    "worklogs": (Worklog, ("uid",)),
+    "mutations": (Mutation, ("uid", "mutation_id")),
+    "audit_events": (AuditEvent, ("id",)),
+}
+_RESTORE_ONLY_TABLES = ("account_emails", "sessions", "session_access", "session_refresh", "reset_tokens", "rate_bins")
+
+
 class DuplicateAccountEmail(Exception):
     pass
 
@@ -94,6 +105,10 @@ class StoreUnavailable(Exception):
 
 
 class Transaction(Protocol):
+    def backup_page(self, table: str, after: tuple[str, ...], limit: int) -> list: ...
+    def backup_target_empty(self) -> bool: ...
+    def insert_backup_page(self, table: str, records: list) -> None: ...
+
     def get_account(self, uid: str) -> Account | None: ...
     def get_account_by_email(self, email: str) -> Account | None: ...
     def list_accounts(self, after_uid: str, limit: int) -> list[Account]: ...
@@ -139,7 +154,8 @@ class Store(Protocol):
 class YdbStore:
     """A shared SDK session pool, with a fresh transaction for each retry."""
 
-    def __init__(self, driver):
+    def __init__(self, driver, database):
+        self.database = database
         self._driver = driver
         self._pool = ydb.QuerySessionPool(driver, size=8)
 
@@ -150,7 +166,7 @@ class YdbStore:
         driver = ydb.Driver(endpoint=endpoint, database=database, credentials=credentials)
         try:
             driver.wait(timeout=5, fail_fast=True)
-            return cls(driver)
+            return cls(driver, database)
         except BaseException:
             driver.stop(timeout=2)
             raise
@@ -210,6 +226,55 @@ class _YdbTransaction:
     def _one(self, model, query, **params):
         rows = self._rows(query, **params)
         return model(**rows[0]) if rows else None
+
+    def backup_page(self, table, after, limit):
+        model, keys = BACKUP_TABLES[table]
+        order = ", ".join(keys)
+        declarations = " ".join(f"DECLARE $key{i} AS Utf8;" for i in range(len(keys)))
+        condition = f"{keys[0]} > $key0"
+        if len(keys) == 2:
+            condition += f" OR ({keys[0]} = $key0 AND {keys[1]} > $key1)"
+        rows = self._rows(f"""
+            {declarations}
+            DECLARE $limit AS Uint64;
+            SELECT * FROM `{table}` WHERE {condition} ORDER BY {order} LIMIT $limit;
+        """, limit=limit, **{f"key{i}": value for i, value in enumerate(after)})
+        if model is Worklog:
+            for row in rows:
+                row["data"] = json.loads(row.pop("data_json"))
+        return [model(**row) for row in rows]
+
+    def backup_target_empty(self):
+        tables = (*BACKUP_TABLES, *_RESTORE_ONLY_TABLES)
+        return not self._rows("\n".join(f"SELECT 1 AS present FROM `{table}` LIMIT 1;" for table in tables))
+
+    def insert_backup_page(self, table, records):
+        model, _ = BACKUP_TABLES[table]
+        types = {str: ("Utf8", ydb.PrimitiveType.Utf8),
+                 int: ("Uint64", ydb.PrimitiveType.Uint64),
+                 bool: ("Bool", ydb.PrimitiveType.Bool)}
+        rows = [asdict(record) for record in records]
+        columns = {field.name: field.type for field in fields(model)}
+        if model is Worklog:
+            del columns["data"]
+            columns["data_json"] = str
+            for row in rows:
+                row["data_json"] = json.dumps(row.pop("data"), ensure_ascii=False, allow_nan=False)
+        if model is Account:
+            self._insert_backup_rows("account_emails", {"email_digest": str, "uid": str},
+                                     [{"email_digest": digest(row["email"]), "uid": row["uid"]} for row in rows], types)
+        self._insert_backup_rows(table, columns, rows, types)
+
+    def _insert_backup_rows(self, table, columns, rows, types):
+        row_type = ydb.StructType()
+        for name, kind in columns.items():
+            row_type.add_member(name, types[kind][1])
+        definition = ", ".join(f"{name}:{types[kind][0]}" for name, kind in columns.items())
+        names = ", ".join(f"`{name}`" for name in columns)
+        self._rows(f"""
+            DECLARE $rows AS List<Struct<{definition}>>;
+            INSERT INTO `{table}` ({names}) SELECT {names} FROM AS_TABLE($rows);
+        """, rows=ydb.TypedValue(rows, ydb.ListType(row_type)))
 
     def get_account(self, uid):
         return self._one(Account, """

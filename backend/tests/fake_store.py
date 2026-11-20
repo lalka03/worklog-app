@@ -6,7 +6,7 @@ from threading import Lock
 from uuid import uuid4
 
 from backend.security import digest, new_token
-from backend.store import DuplicateAccountEmail, Session
+from backend.store import BACKUP_TABLES, DuplicateAccountEmail, Session
 
 
 def seed_test_session(store, account, now, access_token=None):
@@ -19,6 +19,8 @@ def seed_test_session(store, account, now, access_token=None):
 
 
 class FakeStore:
+    database = None
+
     def __init__(self):
         self._lock = Lock()
         self.records = {
@@ -48,6 +50,25 @@ class FakeTransaction:
         if key in self._records[table]:
             raise ValueError("duplicate storage key")
         self._records[table][key] = value
+
+    def backup_page(self, table, after, limit):
+        _, keys = BACKUP_TABLES[table]
+        indexed = {tuple(getattr(record, key) for key in keys): record for record in self._records[table].values()}
+        return [indexed[key] for key in sorted(indexed) if key > after][:limit]
+
+    def backup_target_empty(self):
+        return not any(self._records.values())
+
+    def insert_backup_page(self, table, records):
+        write = {
+            "accounts": self.insert_account,
+            "invitations": self.insert_invitation,
+            "worklogs": self.put_worklog,
+            "mutations": self.put_mutation,
+            "audit_events": self.put_audit,
+        }[table]
+        for record in records:
+            write(record)
 
     def get_account(self, uid):
         return self._records["accounts"].get(uid)

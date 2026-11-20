@@ -6,6 +6,7 @@ info:
 # At deployment, substitute these two placeholders with the new private test function ID
 # and the dedicated gateway service account ID. Grant that identity functions.functionInvoker
 # on this function only. The function runs as a separate identity scoped to the test YDB.
+# The scheduled backup uses its own private function and has no Gateway integration.
 paths:
   /auth/register:
     post: &http_operation

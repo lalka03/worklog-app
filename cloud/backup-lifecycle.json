@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-yandex-test-backups",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "yandex-test/" },
+      "Expiration": { "Days": 30 }
+    }
+  ]
+}
