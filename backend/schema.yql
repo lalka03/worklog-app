@@ -1,0 +1,99 @@
+CREATE TABLE accounts (
+    uid Utf8 NOT NULL,
+    email Utf8 NOT NULL,
+    password_hash Utf8 NOT NULL,
+    role Utf8 NOT NULL,
+    enabled Bool NOT NULL,
+    created_at Uint64 NOT NULL,
+    session_generation Uint64 NOT NULL,
+    PRIMARY KEY (uid)
+);
+
+-- The normalized address appears in accounts only. Its digest reserves the
+-- unique lookup key in the same transaction that inserts the account.
+CREATE TABLE account_emails (
+    email_digest Utf8 NOT NULL,
+    uid Utf8 NOT NULL,
+    PRIMARY KEY (email_digest)
+);
+
+CREATE TABLE invitations (
+    digest Utf8 NOT NULL,
+    id Utf8 NOT NULL,
+    issuer_uid Utf8 NOT NULL,
+    created_at Uint64 NOT NULL,
+    expires_at Uint64 NOT NULL,
+    state Utf8 NOT NULL,
+    consumed_by Utf8 NOT NULL,
+    INDEX by_id GLOBAL SYNC ON (id),
+    PRIMARY KEY (digest)
+);
+
+CREATE TABLE sessions (
+    id Utf8 NOT NULL,
+    uid Utf8 NOT NULL,
+    generation Uint64 NOT NULL,
+    access_digest Utf8 NOT NULL,
+    refresh_digest Utf8 NOT NULL,
+    access_expires_at Uint64 NOT NULL,
+    refresh_expires_at Uint64 NOT NULL,
+    PRIMARY KEY (id)
+) WITH (TTL = Interval("PT0S") ON refresh_expires_at AS SECONDS);
+
+-- Earlier access digests are retained solely to support logout racing renewal.
+CREATE TABLE session_access (
+    digest Utf8 NOT NULL,
+    session_id Utf8 NOT NULL,
+    expires_at Uint64 NOT NULL,
+    PRIMARY KEY (digest)
+) WITH (TTL = Interval("PT0S") ON expires_at AS SECONDS);
+
+CREATE TABLE session_refresh (
+    digest Utf8 NOT NULL,
+    session_id Utf8 NOT NULL,
+    expires_at Uint64 NOT NULL,
+    PRIMARY KEY (digest)
+) WITH (TTL = Interval("PT0S") ON expires_at AS SECONDS);
+
+CREATE TABLE reset_tokens (
+    digest Utf8 NOT NULL,
+    uid Utf8 NOT NULL,
+    issuer_uid Utf8 NOT NULL,
+    generation Uint64 NOT NULL,
+    expires_at Uint64 NOT NULL,
+    used Bool NOT NULL,
+    PRIMARY KEY (digest)
+) WITH (TTL = Interval("PT0S") ON expires_at AS SECONDS);
+
+CREATE TABLE rate_bins (
+    rate_key Utf8 NOT NULL,
+    attempts_json Utf8 NOT NULL,
+    expires_at Uint64 NOT NULL,
+    PRIMARY KEY (rate_key)
+) WITH (TTL = Interval("PT0S") ON expires_at AS SECONDS);
+
+CREATE TABLE worklogs (
+    uid Utf8 NOT NULL,
+    data_json Utf8 NOT NULL,
+    revision Uint64 NOT NULL,
+    updated_at Uint64 NOT NULL,
+    PRIMARY KEY (uid)
+);
+
+CREATE TABLE mutations (
+    uid Utf8 NOT NULL,
+    mutation_id Utf8 NOT NULL,
+    request_digest Utf8 NOT NULL,
+    revision Uint64 NOT NULL,
+    updated_at Uint64 NOT NULL,
+    PRIMARY KEY (uid, mutation_id)
+);
+
+CREATE TABLE audit_events (
+    id Utf8 NOT NULL,
+    action Utf8 NOT NULL,
+    actor_uid Utf8 NOT NULL,
+    target_id Utf8 NOT NULL,
+    created_at Uint64 NOT NULL,
+    PRIMARY KEY (id)
+);
