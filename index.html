@@ -864,9 +864,43 @@ function bindSettings(){
     };
     saveDB(); toast('Настройки сохранены'); render();
   };
-  document.getElementById('expBtn').onclick=()=>{
-    const blob = new Blob([JSON.stringify({settings:DB.settings, days:DB.days}, null, 2)], {type:'application/json'});
-    const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='worklog_backup.json'; a.click();
+  document.getElementById('expBtn').onclick=async (event)=>{
+    const button = event.currentTarget;
+    if(button.disabled) return;
+    button.disabled = true;
+    try {
+      // Keep the existing JSON format compatible with import and older backups.
+      const data = JSON.stringify({settings:DB.settings, days:DB.days}, null, 2);
+      const filename = 'worklog_backup_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+      const capacitor = window.Capacitor;
+      if(capacitor && capacitor.isNativePlatform()){
+        if(!capacitor.isPluginAvailable('Filesystem') || !capacitor.isPluginAvailable('Share')){
+          throw new Error('Native backup plugins unavailable');
+        }
+        // Android FileProvider shares files from the private cache without storage permissions.
+        const {Filesystem, Share} = capacitor.Plugins;
+        const result = await Filesystem.writeFile({
+          path:filename, data, directory:'CACHE', encoding:'utf8'
+        });
+        await Share.share({title:'Резервная копия Worklog', files:[result.uri], dialogTitle:'Сохранить или отправить копию'});
+        // The receiving app decides whether the file is saved permanently.
+      } else {
+        const blob = new Blob([data], {type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        try { a.click(); } finally {
+          a.remove();
+          setTimeout(()=>URL.revokeObjectURL(url), 1000);
+        }
+      }
+    } catch(err) {
+      toast('Не удалось завершить экспорт. Попробуйте снова.');
+    } finally {
+      button.disabled = false;
+    }
   };
   document.getElementById('impBtn').onclick=()=>document.getElementById('impFile').click();
   document.getElementById('impFile').onchange=async (e)=>{
