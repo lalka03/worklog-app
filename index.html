@@ -111,14 +111,14 @@
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
   .modal{position:fixed; inset:0; background:rgba(0,0,0,0.5); display:none; z-index:50; align-items:center; justify-content:center; padding:20px; backdrop-filter: blur(2px);}
   .modal.show{display:flex;}
+  [hidden]{display:none!important;}
   .modal-box{background:var(--card); border-radius:20px; padding:20px; max-width:340px; width:100%;}
   .modal-box h3{margin:0 0 8px; font-size:18px;}
   .modal-box p{margin:0 0 20px; font-size:14px; color:var(--muted);}
 </style>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
 <script src="account.js"></script>
+<script src="api.js"></script>
+<script src="sync.js"></script>
 </head>
 <body>
 <header>
@@ -134,6 +134,13 @@
     </button>
   </div>
 </header>
+<section id="syncPanel" hidden style="padding:8px 16px;">
+  <div id="syncStatus" class="muted" role="status"></div>
+  <button class="btn ghost" id="syncKeepServer" hidden>Загрузить с сервера</button>
+  <button class="btn ghost" id="syncRetryLocal" hidden>Отправить черновик</button>
+  <button class="btn ghost" id="syncExportDraft" hidden>Экспорт черновика</button>
+  <button class="btn ghost" id="syncRefresh" hidden>Повторить синхронизацию</button>
+</section>
 <main id="app"></main>
 <nav id="nav" style="display:none">
   <button data-tab="home" class="active">
@@ -174,164 +181,140 @@ const DEFAULT_SETTINGS = {
   rates: {1: 280, 2: 322, 3: 350}
 };
 
-// ===== Firebase cloud sync =====
-const firebaseConfig = {
-  apiKey: "AIzaSyB95YRt3Tq8m5iC5OHEZ_5mDUFLlllE1uk",
-  authDomain: "worklog-test-3d6d7.firebaseapp.com",
-  databaseURL: "https://worklog-test-3d6d7-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "worklog-test-3d6d7",
-  storageBucket: "worklog-test-3d6d7.firebasestorage.app",
-  messagingSenderId: "473809303523",
-  appId: "1:473809303523:web:e9bbd9ab24a401c60652d6"
-};
-const {userScope, canWrite, employeeRows} = WorklogAccounts;
-let activeUser = null, scope = null, isAdmin = null, authReady = false;
-let accountError = '', adminData = null, session = 0;
-let fbRef = null;
-let cloudSynced = false;
-let applyingRemote = false;
-let pushTimer = null;
+const WORKLOG_API_BASE_URL = '';
+const {userScope,canWrite,employeeRows,validateWorklog,validDate,validNumber,validShift} = WorklogAccounts;
+let activeUser=null, scope=null, isAdmin=null, authReady=true;
+let accountError='', authMode='login', adminData=null, session=0;
+let sync=null, syncState=null, syncTimer=null, syncDelay=2000;
+let invites=[], inviteBusy=false, inviteError='', adminSecret=null, cancelConfirm=null;
+let DB=normalizeRemote();
+const api=WorklogApi.create({baseUrl:WORKLOG_API_BASE_URL,fetch:(...args)=>fetch(...args),onSession:user=>{
+  if(!user){
+    clearAccount();
+    accountError='Сеанс завершён. Войдите снова.';
+    render();
+  } else if(user.uid===scope?.uid){
+    activeUser=user;
+    if(user.role!=='admin') closeAdmin();
+    else {isAdmin=true; updateEmployeeTab();}
+  }
+}});
 
-let DB = loadDB();
-function loadDB(){
-  try{
-    const raw = scope ? localStorage.getItem(scope.cache) : null;
-    if(!raw) return {settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), days: {}, version: 1};
-    const o = JSON.parse(raw);
-    const s = Object.assign({}, DEFAULT_SETTINGS, o.settings||{});
-    s.rates = Object.assign({1:280,2:322,3:350}, (o.settings&&o.settings.rates)||{});
-    return {settings:s, days: o.days||{}, version:1, updatedAt:o.updatedAt||0};
-  }catch(e){
-    return {settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), days:{}, version:1};
-  }
-}
-function saveDB(){
-  if(!canWrite(activeUser,isAdmin) || !scope) return;
-  DB.updatedAt = Date.now();
-  localStorage.setItem(scope.cache, JSON.stringify(DB));
-  scheduleCloudPush();
-}
-function saveDBLocal(){
-  if(canWrite(activeUser,isAdmin) && scope) localStorage.setItem(scope.cache, JSON.stringify(DB));
-}
-function canon(o){
-  if(Array.isArray(o)) return o.map(canon);
-  if(o && typeof o === 'object'){
-    const out = {};
-    Object.keys(o).sort().forEach(k => { out[k] = canon(o[k]); });
-    return out;
-  }
-  return o;
-}
-function scheduleCloudPush(){
-  if(!fbRef || !canWrite(activeUser,isAdmin)) return;
-  clearTimeout(pushTimer);
-  pushTimer = setTimeout(cloudPush, 400);
-}
-function cloudPush(){
-  if(!fbRef || applyingRemote || !canWrite(activeUser,isAdmin)) return;
-  const payload = {
-    settings: DB.settings,
-    days: DB.days,
-    version: 1,
-    updatedAt: DB.updatedAt || Date.now()
-  };
-  const current = session;
-  fbRef.set(payload).catch(()=>{if(current===session) toast('Не удалось синхронизировать данные');});
-}
 function normalizeRemote(remote){
-  const s = Object.assign({}, DEFAULT_SETTINGS, remote.settings||{});
-  s.rates = Object.assign({1:280,2:322,3:350}, (remote.settings&&remote.settings.rates)||{});
-  return { settings: s, days: remote.days||{}, version: 1, updatedAt: remote.updatedAt||0 };
+  const settings={...DEFAULT_SETTINGS,...remote?.settings,rates:{...DEFAULT_SETTINGS.rates,...remote?.settings?.rates}};
+  return {version:1,settings,days:remote?.days||{}};
 }
-function adoptRemote(remote){
-  applyingRemote = true;
-  DB = normalizeRemote(remote);
-  saveDBLocal();
-  applyingRemote = false;
+function saveDB(data=DB){
+  if(!canWrite(activeUser,isAdmin) || !sync) return false;
+  if(!sync.edit(data)){
+    toast('Не удалось сохранить данные. Проверьте значения и свободное место.');
+    return false;
+  }
+  scheduleSync(400);
+  return true;
 }
 function clearAccount(){
   session++;
-  clearTimeout(pushTimer);
-  if(fbRef) fbRef.off();
-  fbRef = null; cloudSynced = false; applyingRemote = false;
-  activeUser = null; scope = null; isAdmin = null; adminData = null;
-  employeeView = newEmployeeView(); employeesLoading = false; employeesError = '';
-  DB = loadDB(); state.tab='home'; state.editDate=null;
+  clearTimeout(syncTimer);
+  sync?.close();
+  sync=null; syncState=null; syncDelay=2000;
+  activeUser=null; scope=null; isAdmin=null; adminData=null;
+  authMode='login'; accountError=''; authReady=true;
+  employeeView=newEmployeeView(); employeesLoading=false; employeesError='';
+  invites=[]; inviteBusy=false; inviteError=''; adminSecret=null;
+  cancelConfirm?.();
+  DB=normalizeRemote();
+  const date=today();
+  Object.assign(state,{tab:'home',viewYear:date.getFullYear(),viewMonth:date.getMonth(),editDate:null,settingsDirty:false});
 }
 async function bindAccount(user){
   clearAccount();
-  const current = session;
-  activeUser = user; scope = userScope(user); accountError=''; authReady=false;
-  if(!scope){authReady=true; render(); return;}
+  scope=userScope(user);
+  if(!scope){render();return;}
+  activeUser=user;
+  isAdmin=user.role==='admin';
+  const current=session;
+  sync=WorklogSync.create({uid:scope.uid,storage:localStorage,api,canSend:syncAvailable,
+    canRefresh:()=>!state.editDate && !state.settingsDirty,onState:next=>{
+    if(current!==session) return;
+    const revisionChanged=next.revision!==syncState?.revision;
+    syncState=next;
+    DB=normalizeRemote(next.data);
+    if(revisionChanged && !state.editDate && !state.settingsDirty && state.tab!=='employees') render();
+    else renderSyncStatus();
+  }});
+  syncState=sync.load();
+  DB=normalizeRemote(syncState.data);
   render();
-  try{
-    const role = await firebase.database().ref('admins/'+scope.uid).once('value');
-    if(current!==session) return;
-    isAdmin = role.val() === true;
-    await firebase.database().ref('users/'+scope.uid+'/profile').set({email:user.email || ''});
-    if(current!==session) return;
-    DB=loadDB();
-    fbRef = firebase.database().ref(scope.path);
-    const snapshot = await fbRef.once('value');
-    if(current!==session) return;
-    cloudSynced=true; initialCloudSync(snapshot.val());
-    fbRef.on('value', snap=>{if(current===session) applyRemoteIfDifferent(snap.val());}, ()=>{if(current===session) toast('Синхронизация недоступна');});
-    authReady=true; render();
-  } catch(e){
-    if(current!==session) return;
-    accountError='Доступ к данным не настроен или нет связи. Повторите вход.';
-    authReady=true; isAdmin=null; render();
+  await runSync(current);
+}
+function syncAvailable(){return !document.hidden && navigator.onLine!==false;}
+function scheduleSync(delay){
+  clearTimeout(syncTimer);
+  if(!sync || !syncAvailable()) return;
+  const current=session;
+  syncTimer=setTimeout(()=>runSync(current),delay);
+}
+async function runSync(current){
+  if(current!==session || !sync || !syncAvailable()) return;
+  await sync.refresh();
+  if(current!==session) return;
+  if(syncState?.pending && ['network','timeout','rate_limited','internal_error','service_unavailable','request_failed'].includes(syncState.error)){
+    scheduleSync(syncDelay);
+    syncDelay=Math.min(syncDelay*2,60000);
+  } else {
+    syncDelay=2000;
+    scheduleSync(60000);
   }
 }
-function initFirebase(){
-  try{
-    firebase.initializeApp(firebaseConfig);
-    firebase.auth().onAuthStateChanged(bindAccount, ()=>{accountError='Ошибка входа'; authReady=true; render();});
-  }catch(e){accountError='Не удалось подключиться к Firebase. Проверьте интернет.'; authReady=true; render();}
+function renderSyncStatus(){
+  const panel=document.getElementById('syncPanel');
+  panel.hidden=!syncState;
+  if(!syncState) return;
+  const {conflict,error,pending,revision}=syncState;
+  const unresolved=conflict && !conflict.resolved;
+  const blocked=pending?.blocked;
+  const messages={storage:'Не удалось сохранить данные на устройстве.',invalid_worklog:'Данные не прошли проверку.',
+    unconfigured:'Сервер приложения не настроен.'};
+  document.getElementById('syncStatus').textContent=unresolved
+    ? 'Есть изменения на другом устройстве. Ваш черновик сохранён.'
+    : blocked==='worklog_too_large'?'Данные превышают лимит сервера. Черновик сохранён на устройстве.'
+    : blocked?'Сервер отклонил данные. Черновик сохранён на устройстве.'
+    : messages[error] || (error || navigator.onLine===false
+      ? (pending?'Нет синхронизации. Изменения сохранены на устройстве.':'Синхронизация недоступна.')
+      : pending?'Изменения ожидают отправки.':revision===null?'Ожидание первой синхронизации…':'Данные синхронизированы.');
+  document.getElementById('syncKeepServer').hidden=!unresolved;
+  document.getElementById('syncRetryLocal').hidden=!unresolved;
+  document.getElementById('syncExportDraft').hidden=!conflict && !blocked;
+  document.getElementById('syncRefresh').hidden=!error || unresolved || !!blocked;
 }
-function initialCloudSync(remote){
-  const remoteDays = (remote && remote.days) ? remote.days : {};
-  const localDays = DB.days || {};
-  const remoteHas = !!remote;
-  const localHas = Object.keys(localDays).length > 0 || DB.updatedAt>0;
-  if(remoteHas && !localHas){
-    adoptRemote(remote);
-    toast('Данные загружены из облака');
-    render();
-  } else if(!remoteHas && localHas){
-    cloudPush();
-    toast('Данные отправлены в облако');
-  } else if(remoteHas && localHas){
-    const remoteTs = remote.updatedAt || 0;
-    const localTs = DB.updatedAt || 0;
-    if(remoteTs > localTs){
-      adoptRemote(remote);
-      toast('Данные обновлены из облака');
-      render();
-    } else {
-      cloudPush();
-    }
-  }
+async function recoverSync(choice){
+  const current=session;
+  const retry=choice==='retry-local';
+  const approved=await confirmModal('Конфликт синхронизации',retry
+    ? 'Отправить ваш черновик и заменить им текущую версию на сервере?'
+    : 'Загрузить текущую версию сервера? Ваш черновик останется доступен для экспорта.',retry?'Отправить черновик':'Загрузить с сервера');
+  if(!approved || current!==session || !sync) return;
+  await sync.resolveConflict(choice);
+  if(current!==session) return;
+  if(syncState.error) toast('Не удалось обновить данные. Черновик сохранён.');
+  else if(!syncState.conflict || syncState.conflict.resolved){state.editDate=null;state.settingsDirty=false;render();}
+  scheduleSync(60000);
 }
-function applyRemoteIfDifferent(remote){
-  if(!remote) return;
-  if(applyingRemote) return;
-  if(JSON.stringify(canon(remote.days||{})) === JSON.stringify(canon(DB.days||{})) && JSON.stringify(canon(remote.settings||{})) === JSON.stringify(canon(DB.settings||{}))){
-    return;
-  }
-  adoptRemote(remote);
-  toast('Данные обновлены из облака');
-  render();
-}
+window.addEventListener('online',()=>{renderSyncStatus();scheduleSync(0);});
+window.addEventListener('offline',()=>{clearTimeout(syncTimer);renderSyncStatus();});
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden) clearTimeout(syncTimer);
+  else scheduleSync(0);
+});
 
 const clone = o => JSON.parse(JSON.stringify(o));
 const WD = ['воскресенье','понедельник','вторник','среда','четверг','пятница','суббота'];
 const WD_SHORT = ['вс','пн','вт','ср','чт','пт','сб'];
 const MONTHS = ['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'];
 const pad2 = n => (n<10?'0':'')+n;
-const ymd = d => d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
-const parseYmd = s => { const [y,m,d]=s.split('-').map(Number); return new Date(y,m-1,d); };
+const ymd = d => String(d.getFullYear()).padStart(4,'0')+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
+const parseYmd = s => { const [y,m,d]=s.split('-').map(Number); const date=today(); date.setFullYear(y,m-1,d); return date; };
 const today = () => { const t=new Date(); return new Date(t.getFullYear(),t.getMonth(),t.getDate()); };
 const round2 = x => Math.round((x+Number.EPSILON)*100)/100;
 const fmt2 = x => (isFinite(x)?x:0).toFixed(2).replace('.',',');
@@ -455,7 +438,7 @@ function monthSummary(y, m, data=DB){
   }
   return {total:round2(total), hours:round2(hours), filled, days:n};
 }
-let state = { tab: 'home', viewYear: today().getFullYear(), viewMonth: today().getMonth(), editDate: null };
+let state = { tab: 'home', viewYear: today().getFullYear(), viewMonth: today().getMonth(), editDate: null, settingsDirty:false };
 function newEmployeeView(){return {uid:null,year:today().getFullYear(),month:today().getMonth(),date:null,mode:'calendar'};}
 let employeeView = newEmployeeView(), employeesLoading = false, employeesError = '';
 function toast(msg){
@@ -465,6 +448,7 @@ function toast(msg){
 }
 function confirmModal(title, text, okLabel='ОК'){
   const current = session;
+  cancelConfirm?.();
   return new Promise(res=>{
     const m=document.getElementById('modal');
     document.getElementById('mTitle').textContent=title;
@@ -473,17 +457,22 @@ function confirmModal(title, text, okLabel='ОК'){
     m.classList.add('show');
     const ok=()=>{cleanup(); res(current===session && canWrite(activeUser,isAdmin));};
     const cancel=()=>{cleanup(); res(false);};
-    function cleanup(){ m.classList.remove('show'); document.getElementById('mOk').removeEventListener('click',ok); document.getElementById('mCancel').removeEventListener('click',cancel); }
+    cancelConfirm=cancel;
+    function cleanup(){ cancelConfirm=null; m.classList.remove('show'); document.getElementById('mOk').removeEventListener('click',ok); document.getElementById('mCancel').removeEventListener('click',cancel); }
     document.getElementById('mOk').addEventListener('click',ok);
     document.getElementById('mCancel').addEventListener('click',cancel);
   });
 }
 function setTab(t){
   if(t==='employees' && (!authReady || isAdmin!==true || accountError)) return;
-  state.tab=t; state.editDate=null;
+  if(t!=='employees'){
+    adminSecret=null;
+    if(state.tab==='employees') employeeView={...employeeView};
+  }
+  state.tab=t; state.editDate=null; state.settingsDirty=false;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
   render(); window.scrollTo({top:0, behavior:'instant'});
-  if(t==='employees') refreshEmployees();
+  if(t==='employees'){refreshEmployees();refreshInvites();}
 }
 document.getElementById('nav').addEventListener('click', e=>{
   const b = e.target.closest('button[data-tab]');
@@ -494,77 +483,216 @@ document.getElementById('btnAddToday').onclick = () => {
   render();
 };
 function renderLogin(app){
-  app.innerHTML=`<div class="card"><h2>Вход в Worklog Test</h2><p class="muted">Войдите в свой личный кабинет или зарегистрируйтесь.</p>
-  <form id="loginForm"><div class="input-group"><input id="loginEmail" type="email" autocomplete="username" placeholder=" " required><label>Электронная почта</label></div>
-  <div class="input-group"><input id="loginPassword" type="password" autocomplete="current-password" placeholder=" " required minlength="6"><label>Пароль</label></div>
-  <div style="display:grid;gap:10px"><button class="btn primary" type="submit">Войти</button><button class="btn ghost" type="button" id="registerBtn">Зарегистрироваться</button><button class="btn" type="button" id="resetBtn">Забыл пароль</button></div></form>
+  const registering=authMode==='register', resetting=authMode==='reset';
+  app.innerHTML=`<div class="card"><h2>${registering?'Регистрация':resetting?'Восстановление пароля':'Вход в Worklog Yandex Test'}</h2>
+  ${resetting?'<p class="muted">Введите одноразовый код, полученный от администратора.</p>':''}
+  <form id="loginForm">
+  ${resetting?'':'<div class="input-group"><input id="loginEmail" type="email" autocomplete="username" placeholder=" " required maxlength="254"><label for="loginEmail">Электронная почта</label></div>'}
+  <div class="input-group"><input id="loginPassword" type="password" autocomplete="${authMode==='login'?'current-password':'new-password'}" placeholder=" " required minlength="12" maxlength="128"><label for="loginPassword">${resetting?'Новый пароль':'Пароль'}</label></div>
+  ${registering || resetting?`<div class="input-group"><input id="loginInvite" type="text" autocapitalize="off" spellcheck="false" autocomplete="off" placeholder=" " maxlength="128" required><label for="loginInvite">${registering?'Код приглашения':'Код восстановления'}</label></div>`:''}
+  <div style="display:grid;gap:10px"><button class="btn primary" type="submit">${registering?'Зарегистрироваться':resetting?'Установить пароль':'Войти'}</button>
+  ${authMode==='login'?'<button class="btn ghost" type="button" id="registerBtn">Зарегистрироваться</button><button class="btn" type="button" id="resetBtn">Забыл пароль</button>':'<button class="btn ghost" type="button" id="loginBack">Ко входу</button>'}</div></form>
   <p class="muted" id="loginStatus" role="status"></p></div>`;
   const form=document.getElementById('loginForm'), status=document.getElementById('loginStatus');
   status.textContent=accountError;
-  async function submit(mode){
-    const email=document.getElementById('loginEmail'), password=document.getElementById('loginPassword');
-    if(!email.reportValidity() || (mode!=='reset' && !password.reportValidity())) return;
-    const buttons=Array.from(form.querySelectorAll('button')); buttons.forEach(b=>b.disabled=true);
+  function setMode(mode){authMode=mode;accountError='';render();}
+  if(authMode==='login'){
+    document.getElementById('registerBtn').onclick=()=>setMode('register');
+    document.getElementById('resetBtn').onclick=()=>setMode('reset');
+  } else document.getElementById('loginBack').onclick=()=>setMode('login');
+  let submitting=false;
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    if(submitting) return;
+    const email=resetting?null:document.getElementById('loginEmail');
+    const password=document.getElementById('loginPassword');
+    const code=registering || resetting?document.getElementById('loginInvite'):null;
+    if((email && !email.reportValidity()) || !password.reportValidity() || (code && (!code.reportValidity() || !code.value.trim()))) return;
+    const current=session;
+    const buttons=Array.from(form.querySelectorAll('button'));
+    submitting=true;
+    buttons.forEach(button=>button.disabled=true);
     status.textContent='Подключение…';
-    try{
-      if(mode==='reset'){
-        await firebase.auth().sendPasswordResetEmail(email.value.trim());
-        status.textContent='Если аккаунт существует, письмо для восстановления отправлено.';
-      } else if(mode==='register') await firebase.auth().createUserWithEmailAndPassword(email.value.trim(),password.value);
-      else await firebase.auth().signInWithEmailAndPassword(email.value.trim(), password.value);
-    }catch(e){status.textContent=mode==='reset' ? 'Не удалось отправить письмо. Проверьте адрес и связь.' : 'Не удалось выполнить вход или регистрацию. Проверьте почту и пароль.';}
-    finally {buttons.forEach(b=>b.disabled=false);}
-  }
-  form.onsubmit=e=>{e.preventDefault(); submit('login');};
-  document.getElementById('registerBtn').onclick=()=>submit('register');
-  document.getElementById('resetBtn').onclick=()=>submit('reset');
+    try {
+      if(resetting){
+        await api.reset(code.value.trim(),password.value);
+        if(current!==session) return;
+        authMode='login'; accountError='Пароль обновлён. Войдите с новым паролем.'; render();
+      } else {
+        const user=registering?await api.register(email.value.trim(),password.value,code.value.trim())
+          :await api.login(email.value.trim(),password.value);
+        if(current===session) await bindAccount(user);
+      }
+    } catch(e){
+      if(current!==session) return;
+      const messages={unconfigured:'Сервер приложения не настроен.',network:'Нет связи с сервером.',timeout:'Сервер не ответил. Повторите попытку.',
+        invalid_credentials:'Проверьте электронную почту и пароль.',invalid_invite:'Приглашение недействительно или уже использовано.',
+        invalid_reset:'Код восстановления недействителен или уже использован.',invalid_email:'Проверьте адрес электронной почты.',
+        invalid_password:'Пароль должен содержать от 12 до 128 символов.',rate_limited:'Слишком много попыток. Повторите позже.'};
+      status.textContent=messages[e.code]||'Не удалось выполнить запрос. Проверьте данные и повторите попытку.';
+    } finally {
+      submitting=false;
+      if(current===session) buttons.forEach(button=>button.disabled=false);
+    }
+  };
+}
+function updateEmployeeTab(){
+  document.getElementById('navEmployees').style.display=authReady && isAdmin===true?'flex':'none';
+}
+function closeAdmin(){
+  adminData=null; employeeView=newEmployeeView(); isAdmin=false;
+  invites=[]; adminSecret=null; inviteError='';
+  if(state.tab==='employees'){cancelConfirm?.();state.tab='home';render();toast('Доступ к сотрудникам отозван');}
+  else updateEmployeeTab();
 }
 async function refreshEmployees(){
-  if(!authReady || isAdmin!==true || !scope || accountError || employeesLoading) return;
+  if(!authReady || isAdmin!==true || !scope || employeesLoading) return;
   const current=session;
   employeesLoading=true; employeesError='';
   if(state.tab==='employees') render();
   try{
-    const snapshot=await firebase.database().ref('users').once('value');
+    const {users}=await api.employees();
     if(current!==session || isAdmin!==true) return;
-    adminData=snapshot.val()||{};
-    if(employeeView.uid && !Object.prototype.hasOwnProperty.call(adminData,employeeView.uid)) employeeView=newEmployeeView();
-  }catch(e){
-    if(current===session){
-      employeesError='Не удалось загрузить сотрудников. Повторите попытку.';
-      if(String(e?.code||'').toLowerCase().replace(/-/g,'_').includes('permission_denied')){
-        adminData=null;employeeView=newEmployeeView();isAdmin=false;
-        if(state.tab==='employees'){state.tab='home';render();toast('Доступ к сотрудникам отозван');}
-      }
-    }
-  }
-  finally{
+    adminData=users;
+    if(employeeView.uid && !Object.prototype.hasOwnProperty.call(adminData,employeeView.uid)) setEmployeeView();
+  } catch(e){
+    if(current!==session) return;
+    if(e.status===403) closeAdmin();
+    else employeesError='Не удалось загрузить сотрудников. Повторите попытку.';
+  } finally {
     if(current===session){
       employeesLoading=false;
       if(state.tab==='employees') render();
     }
   }
 }
+async function inviteAction(action){
+  if(isAdmin!==true || inviteBusy) return;
+  const current=session;
+  inviteBusy=true; inviteError='';
+  if(state.tab==='employees') render();
+  try {await action(()=>current===session && isAdmin===true && state.tab==='employees');}
+  catch(e){
+    if(current!==session) return;
+    if(e.status===403) closeAdmin();
+    else inviteError='Не удалось выполнить действие с кодом. Повторите попытку.';
+  } finally {
+    if(current===session){
+      inviteBusy=false;
+      if(state.tab==='employees') render();
+    }
+  }
+}
+function refreshInvites(){
+  return inviteAction(async current=>{
+    const result=await api.listInvites();
+    if(current()) invites=result.invites;
+  });
+}
+function setEmployeeView(uid=null){
+  if(adminSecret?.kind==='reset') adminSecret=null;
+  employeeView={...newEmployeeView(),uid};
+}
 function selectEmployee(uid){
   if(isAdmin!==true || !authReady || !adminData || uid===scope?.uid || !Object.prototype.hasOwnProperty.call(adminData,uid)) return;
-  employeeView={...newEmployeeView(),uid};
+  setEmployeeView(uid);
   render();
 }
 function employeeWorklog(row){
   const data=normalizeRemote({settings:row.settings,days:{}});
   const s=data.settings;
-  const validDate=value=>typeof value==='string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && ymd(parseYmd(value))===value;
   if(!validDate(s.anchor)) s.anchor=DEFAULT_SETTINGS.anchor;
-  const validNumber=(v)=> (typeof v==='number'||typeof v==='string') && String(v).trim()!=='' && Number.isFinite(Number(v)) && Number(v)>=0;
-  for(const key of ['p1','p2','p3','th1','th2','coef']) if(!validNumber(s[key])) s[key]=DEFAULT_SETTINGS[key];
+  for(const key of ['p1','p2','p3','th1','th2','coef']) if(!validNumber(s[key],1e6)) s[key]=DEFAULT_SETTINGS[key];
   if(+s.p1 + +s.p2 + +s.p3===0) for(const key of ['p1','p2','p3']) s[key]=DEFAULT_SETTINGS[key];
-  for(const key of [1,2,3]) if(!validNumber(s.rates[key])) s.rates[key]=DEFAULT_SETTINGS.rates[key];
-  const cleanBlock=b=>b && typeof b==='object' ? {hours:validNumber(b.hours)?b.hours:0,route:validNumber(b.route)?b.route:0,departure:typeof b.departure==='string'?b.departure:'',after:b.after===true}:null;
+  for(const key of [1,2,3]) if(!validNumber(s.rates[key],1e9)) s.rates[key]=DEFAULT_SETTINGS.rates[key];
+  const cleanBlock=block=>block && validShift(block)?block:null;
   for(const [date,day] of row.days){
     if(!validDate(date) || !day || typeof day!=='object') continue;
     data.days[date]={date,main:cleanBlock(day.main),pod:{s1:cleanBlock(day.pod?.s1),s2:cleanBlock(day.pod?.s2)}};
   }
   return data;
+}
+function renderInvites(app){
+  const card=document.createElement('div'); card.className='card'; app.appendChild(card);
+  const title=document.createElement('h2'); title.textContent='Приглашения'; card.appendChild(title);
+  const create=document.createElement('button'); create.className='btn ghost';
+  create.textContent='Создать приглашение'; create.disabled=inviteBusy;
+  create.onclick=()=>inviteAction(async current=>{
+    const issued=await api.createInvite();
+    if(!current()) return;
+    adminSecret={...issued,kind:'invite'};
+    render();
+    const result=await api.listInvites();
+    if(current()) invites=result.invites;
+  });
+  card.appendChild(create);
+  if(inviteError){
+    const status=document.createElement('p'); status.className='muted'; status.textContent=inviteError; card.appendChild(status);
+  }
+  const labels={available:'Доступно',used:'Использовано',expired:'Истекло',revoked:'Отозвано'};
+  for(const invite of invites){
+    const row=document.createElement('p'); row.style.overflowWrap='anywhere';
+    row.textContent=`${labels[invite.state]||'Неизвестно'} · ${invite.id} · до ${formatExpiry(invite.expiresAt)}`;
+    if(invite.state==='available'){
+      const revoke=document.createElement('button'); revoke.className='btn ghost';
+      revoke.textContent='Отозвать'; revoke.disabled=inviteBusy;
+      revoke.onclick=async()=>{
+        if(!await confirmModal('Отозвать приглашение?','Код больше нельзя будет использовать.','Отозвать')) return;
+        return inviteAction(async current=>{
+          await api.revokeInvite(invite.id);
+          if(!current()) return;
+          if(adminSecret?.id===invite.id) adminSecret=null;
+          const result=await api.listInvites();
+          if(current()) invites=result.invites;
+        });
+      };
+      row.appendChild(revoke);
+    }
+    card.appendChild(row);
+  }
+}
+function formatExpiry(value){
+  const date=new Date(value);
+  return Number.isFinite(date.valueOf())?date.toLocaleString('ru-RU'):'';
+}
+function renderAdminSecret(app,row){
+  const secret=adminSecret;
+  if(!secret || (secret.kind==='reset' && secret.recipientUid!==row?.uid)) return;
+  const visible=()=>adminSecret===secret && state.tab==='employees' &&
+    (secret.kind!=='reset' || employeeView.uid===secret.recipientUid);
+  const card=document.createElement('div'); card.className='card'; app.appendChild(card);
+  const title=document.createElement('h2');
+  title.textContent=secret.kind==='invite'?'Код приглашения':'Код восстановления'; card.appendChild(title);
+  if(secret.kind==='reset'){
+    const recipient=document.createElement('p'); recipient.style.overflowWrap='anywhere';
+    recipient.textContent='Получатель: '+secret.recipientEmail; card.appendChild(recipient);
+  }
+  const guidance=document.createElement('p'); guidance.className='muted';
+  guidance.textContent='Скопируйте код и передайте его получателю лично. Действует до '+formatExpiry(secret.expiresAt)+'.';
+  card.appendChild(guidance);
+  const input=document.createElement('input'); input.type='text'; input.value=secret.code; input.readOnly=true;
+  input.setAttribute('aria-label',title.textContent); input.style.width='100%'; card.appendChild(input);
+  const copy=document.createElement('button'); copy.className='btn ghost'; copy.textContent='Скопировать код';
+  copy.onclick=async()=>{
+    if(!visible()) return;
+    try {await navigator.clipboard.writeText(secret.code); if(visible()) toast('Код скопирован');}
+    catch(e){if(visible()){input.focus();input.select();toast('Скопируйте выделенный код');}}
+  };
+  card.appendChild(copy);
+  const hide=document.createElement('button'); hide.className='btn'; hide.textContent='Скрыть код';
+  hide.onclick=()=>{if(visible()){adminSecret=null;render();}}; card.appendChild(hide);
+}
+async function issueEmployeeReset(row){
+  const view=employeeView;
+  const selected=()=>state.tab==='employees' && employeeView===view && view.uid===row.uid;
+  if(!selected()) return;
+  const approved=await confirmModal('Выдать код восстановления?',
+    'Подтвердите личность владельца '+row.email+' перед выдачей кода.','Личность подтверждена');
+  if(!approved || !selected()) return;
+  await inviteAction(async current=>{
+    const issued=await api.issueReset(row.uid);
+    if(current() && selected()) adminSecret={...issued,kind:'reset',recipientUid:row.uid,recipientEmail:row.email};
+  });
 }
 function renderAdmin(app){
   app.replaceChildren();
@@ -579,8 +707,10 @@ function renderAdmin(app){
     const b=document.createElement('button'); b.className='btn ghost'; b.textContent=label; b.onclick=action; return b;
   }
   const actions=document.createElement('div'); actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap'; card.appendChild(actions);
-  const refresh=button('Обновить',refreshEmployees); refresh.disabled=employeesLoading; actions.appendChild(refresh);
+  const refresh=button('Обновить',()=>{refreshEmployees();refreshInvites();}); refresh.disabled=employeesLoading; actions.appendChild(refresh);
   if(!row){
+    renderAdminSecret(app);
+    renderInvites(app);
     for(const item of rows){
       const b=button(item.email+' · дней: '+item.days.length,()=>selectEmployee(item.uid));
       b.className='card'; b.style.cssText='width:100%;text-align:left;color:var(--txt);font:inherit;overflow-wrap:anywhere;cursor:pointer';
@@ -591,10 +721,14 @@ function renderAdmin(app){
     }
     return;
   }
-  actions.appendChild(button('К списку',()=>{employeeView=newEmployeeView();render();}));
+  actions.appendChild(button('К списку',()=>{setEmployeeView();render();}));
   actions.appendChild(button(employeeView.mode==='totals'?'Календарь':'Итоги',()=>{
     employeeView.mode=employeeView.mode==='totals'?'calendar':'totals'; employeeView.date=null; render();
   }));
+  const reset=button('Выдать код восстановления',()=>issueEmployeeReset(row));
+  reset.disabled=inviteBusy; actions.appendChild(reset);
+  renderAdminSecret(app,row);
+  if(inviteError){const status=document.createElement('p');status.textContent=inviteError;card.appendChild(status);}
   const data=employeeWorklog(row);
   const body=document.createElement('div'); app.appendChild(body);
   if(employeeView.mode==='totals'){body.innerHTML=renderTotals(data);return;}
@@ -629,10 +763,18 @@ function renderAdmin(app){
   body.querySelectorAll('.day-item[data-date]').forEach(el=>{el.onclick=()=>{employeeView.date=el.dataset.date;render();};});
 }
 document.getElementById('btnLogout').onclick=async()=>{
-  if(fbRef && pushTimer){clearTimeout(pushTimer); cloudPush();}
-  clearAccount(); authReady=false; render();
-  try{await firebase.auth().signOut();}catch(e){bindAccount(firebase.auth().currentUser);}
+  clearAccount();
+  const logout=api.logout();
+  render();
+  await logout;
 };
+document.getElementById('syncKeepServer').onclick=()=>recoverSync('server');
+document.getElementById('syncRetryLocal').onclick=()=>recoverSync('retry-local');
+document.getElementById('syncExportDraft').onclick=event=>{
+  const draft=syncState?.pending?.blocked?syncState.data:syncState?.conflict?.local;
+  if(draft) return exportBackup(draft,event.currentTarget,'worklog_draft_');
+};
+document.getElementById('syncRefresh').onclick=()=>scheduleSync(0);
 function render(){
   const app = document.getElementById('app');
   const hTitle = document.getElementById('hTitle');
@@ -641,11 +783,12 @@ function render(){
   btnAdd.style.display = 'none';
   const employee = authReady && canWrite(activeUser,isAdmin) && !accountError;
   document.getElementById('nav').style.display = employee ? 'flex' : 'none';
-  document.getElementById('navEmployees').style.display = employee && isAdmin===true ? 'flex' : 'none';
+  updateEmployeeTab();
+  renderSyncStatus();
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab));
   document.getElementById('btnLogout').style.display = activeUser ? 'inline-flex' : 'none';
   if(!employee){
-    hTitle.textContent = 'Worklog Test';
+    hTitle.textContent = 'Worklog Yandex Test';
     hSub.textContent = activeUser ? (activeUser.email || '') : 'Тестовая версия';
     if(!authReady){app.textContent='Подключение…'; return;}
     if(activeUser){app.textContent=accountError || 'Доступ недоступен'; return;}
@@ -832,7 +975,8 @@ function bindForm(){
   document.getElementById('backBtn').onclick=()=>{ state.editDate=null; render(); };
   document.getElementById('clearBtn').onclick=async()=>{
     if(await confirmModal('Очистить день?','Запись будет удалена.','Удалить')){
-      delete DB.days[dateStr]; saveDB(); state.editDate=null; render(); toast('День очищен');
+      const days={...DB.days}; delete days[dateStr];
+      if(saveDB({...DB,days})){state.editDate=null; render(); toast('День очищен');}
     }
   };
   document.querySelectorAll('.segmented').forEach(seg=>{
@@ -900,13 +1044,18 @@ function saveForm(){
   const hasMain = obj.main.hours && Number(obj.main.hours)>0 && obj.main.route;
   const hasP1 = obj.pod.s1.hours && Number(obj.pod.s1.hours)>0 && obj.pod.s1.route;
   const hasP2 = obj.pod.s2.hours && Number(obj.pod.s2.hours)>0 && obj.pod.s2.route;
-  if(!hasMain && !hasP1 && !hasP2){
-    delete DB.days[obj.date]; saveDB(); state.editDate=null; render(); toast('Пустой день удалён'); return;
+  const days={...DB.days};
+  const empty=!hasMain && !hasP1 && !hasP2;
+  if(empty) delete days[obj.date];
+  else {
+    if(!hasMain) delete obj.main;
+    if(!hasP1) delete obj.pod.s1;
+    if(!hasP2) delete obj.pod.s2;
+    days[obj.date]=obj;
   }
-  if(!hasMain) delete obj.main;
-  if(!hasP1) delete obj.pod.s1;
-  if(!hasP2) delete obj.pod.s2;
-  DB.days[obj.date]=obj; saveDB(); state.editDate=null; render(); toast('Сохранено');
+  if(saveDB({...DB,days})){
+    state.editDate=null; render(); toast(empty?'Пустой день удалён':'Сохранено');
+  }
 }
 function aggregate(data=DB){
   const map = new Map();
@@ -1042,76 +1191,82 @@ function renderSettings(){
   `;
 }
 function bindSettings(){
+  document.querySelectorAll('input[id^="set_"]').forEach(input=>input.addEventListener('input',()=>{state.settingsDirty=true;}));
   document.getElementById('set_save').onclick=()=>{
     const g=id=>document.getElementById(id);
-    DB.settings = {
+    const settings = {
       th1:Number(g('set_th1').value), th2:Number(g('set_th2').value), coef:Number(g('set_coef').value),
       anchor:g('set_anchor').value, p1:Number(g('set_p1').value), p2:Number(g('set_p2').value), p3:Number(g('set_p3').value),
       rates:{1:Number(g('set_r1').value), 2:Number(g('set_r2').value), 3:Number(g('set_r3').value)}
     };
-    saveDB(); toast('Настройки сохранены'); render();
-  };
-  document.getElementById('expBtn').onclick=async (event)=>{
-    const button = event.currentTarget;
-    if(button.disabled) return;
-    button.disabled = true;
-    try {
-      // Keep the existing JSON format compatible with import and older backups.
-      const data = JSON.stringify({settings:DB.settings, days:DB.days}, null, 2);
-      const filename = 'worklog_backup_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
-      const capacitor = window.Capacitor;
-      if(capacitor && capacitor.isNativePlatform()){
-        if(!capacitor.isPluginAvailable('Filesystem') || !capacitor.isPluginAvailable('Share')){
-          throw new Error('Native backup plugins unavailable');
-        }
-        // Android FileProvider shares files from the private cache without storage permissions.
-        const {Filesystem, Share} = capacitor.Plugins;
-        const result = await Filesystem.writeFile({
-          path:filename, data, directory:'CACHE', encoding:'utf8'
-        });
-        await Share.share({title:'Резервная копия Worklog', files:[result.uri], dialogTitle:'Сохранить или отправить копию'});
-        // The receiving app decides whether the file is saved permanently.
-      } else {
-        const blob = new Blob([data], {type:'application/json'});
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        try { a.click(); } finally {
-          a.remove();
-          setTimeout(()=>URL.revokeObjectURL(url), 1000);
-        }
-      }
-    } catch(err) {
-      toast('Не удалось завершить экспорт. Попробуйте снова.');
-    } finally {
-      button.disabled = false;
+    if(saveDB({...DB,settings})){
+      state.settingsDirty=false;
+      toast('Настройки сохранены'); render();
     }
   };
+  document.getElementById('expBtn').onclick=event=>exportBackup(DB,event.currentTarget);
   document.getElementById('impBtn').onclick=()=>document.getElementById('impFile').click();
-  document.getElementById('impFile').onchange=async (e)=>{
-    const current=session;
-    const f=e.target.files[0]; if(!f) return;
-    const txt = await f.text();
-    if(current!==session || !canWrite(activeUser,isAdmin)) return;
-    try{ const obj=JSON.parse(txt); if(!obj.days) throw 0;
-      if(await confirmModal('Импорт','Текущие данные будут заменены.','Заменить')){
-        DB = {settings:Object.assign({}, DEFAULT_SETTINGS, obj.settings||{}), days:obj.days};
-        saveDB(); toast('Импортировано'); render();
+  document.getElementById('impFile').onchange=async event=>{
+    const current=session, input=event.target;
+    const file=input.files[0]; if(!file) return;
+    input.value='';
+    try {
+      const text=await file.text();
+      if(current!==session || !canWrite(activeUser,isAdmin)) return;
+      const imported=JSON.parse(text);
+      if(!imported || !imported.days || (imported.version!==undefined && imported.version!==1)) throw new Error('Invalid backup');
+      const data=normalizeRemote(imported);
+      if(!validateWorklog(data)) throw new Error('Invalid worklog');
+      if(await confirmModal('Импорт','Текущие данные будут заменены.','Заменить') && saveDB(data)){
+        state.settingsDirty=false;
+        toast('Импортировано'); render();
       }
-    }catch(err){ toast('Ошибка файла'); }
+    } catch(e){if(current===session) toast('Ошибка файла');}
   };
-  document.getElementById('wipeBtn').onclick=async ()=>{
-    if(await confirmModal('Удалить всё?','Все записи будут стёрты безвозвратно.','Удалить')){
-      if(!canWrite(activeUser,isAdmin) || !scope) return;
-      localStorage.removeItem(scope.cache);
-      DB = loadDB();
-      clearTimeout(pushTimer);
-      saveDB();
+  document.getElementById('wipeBtn').onclick=async()=>{
+    if(await confirmModal('Удалить всё?','Все записи будут стёрты безвозвратно.','Удалить') && saveDB(normalizeRemote())){
+      state.settingsDirty=false;
       toast('Данные удалены'); render();
     }
   };
+}
+async function exportBackup(worklog,button,prefix='worklog_backup_'){
+  const current=session;
+  if(button.disabled) return;
+  button.disabled = true;
+  try {
+    const data = JSON.stringify(worklog, null, 2);
+    const filename = prefix + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+    const capacitor = window.Capacitor;
+    if(capacitor && capacitor.isNativePlatform()){
+      if(!capacitor.isPluginAvailable('Filesystem') || !capacitor.isPluginAvailable('Share')){
+        throw new Error('Native backup plugins unavailable');
+      }
+      // Android FileProvider shares files from the private cache without storage permissions.
+      const {Filesystem, Share} = capacitor.Plugins;
+      const result = await Filesystem.writeFile({
+        path:filename, data, directory:'CACHE', encoding:'utf8'
+      });
+      if(current!==session) return;
+      await Share.share({title:'Резервная копия Worklog', files:[result.uri], dialogTitle:'Сохранить или отправить копию'});
+      // The receiving app decides whether the file is saved permanently.
+    } else {
+      const blob = new Blob([data], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      try { a.click(); } finally {
+        a.remove();
+        setTimeout(()=>URL.revokeObjectURL(url), 1000);
+      }
+    }
+  } catch(err) {
+    if(current===session) toast('Не удалось завершить экспорт. Попробуйте снова.');
+  } finally {
+    button.disabled = false;
+  }
 }
 /* Theme */
 function getSystemDark(){ return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; }
@@ -1137,7 +1292,6 @@ document.getElementById('btnTheme').onclick = () => {
 (function init(){
   initTheme();
   render();
-  initFirebase();
 })();
 </script>
 </body>
