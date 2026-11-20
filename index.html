@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#ffffff">
-<title>Учёт работы</title>
+<title>Worklog Test</title>
 <style>
   :root{
     --bg: #f4f6f9; --card: #ffffff; --line: #e5e9f0; --txt: #111827; --muted: #6b7280;
@@ -116,7 +116,9 @@
   .modal-box p{margin:0 0 20px; font-size:14px; color:var(--muted);}
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-database-compat.js"></script>
+<script src="account.js"></script>
 </head>
 <body>
 <header>
@@ -125,6 +127,7 @@
     <div class="sub" id="hSub">Главная</div>
   </div>
   <div class="hdr-actions">
+    <button class="btn" id="btnLogout" style="display:none">Выйти</button>
     <button class="btn-icon" id="btnTheme" title="Переключить тему"></button>
     <button class="btn-icon" id="btnAddToday" title="Добавить на сегодня" style="display:none;">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
@@ -132,7 +135,7 @@
   </div>
 </header>
 <main id="app"></main>
-<nav id="nav">
+<nav id="nav" style="display:none">
   <button data-tab="home" class="active">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
     Главная
@@ -159,7 +162,6 @@
 </div>
 <script>
 'use strict';
-const LS_KEY = 'worklog.v1';
 const THEME_KEY = 'worklog.theme';
 const DEFAULT_SETTINGS = {
   th1: 3, th2: 13, coef: 1.5,
@@ -170,14 +172,17 @@ const DEFAULT_SETTINGS = {
 
 // ===== Firebase cloud sync =====
 const firebaseConfig = {
-  apiKey: "AIzaSyBJV2muxmCAEJBdfcl_M2bIMZGSGOBqIeE",
-  authDomain: "worklog-app-9d101.firebaseapp.com",
-  databaseURL: "https://worklog-app-9d101-default-rtdb.europe-west1.firebasedatabase.app",
-  projectId: "worklog-app-9d101",
-  storageBucket: "worklog-app-9d101.firebasestorage.app",
-  messagingSenderId: "947197150920",
-  appId: "1:947197150920:web:01cd530e32fa6fdfe107fd"
+  apiKey: "AIzaSyB95YRt3Tq8m5iC5OHEZ_5mDUFLlllE1uk",
+  authDomain: "worklog-test-3d6d7.firebaseapp.com",
+  databaseURL: "https://worklog-test-3d6d7-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "worklog-test-3d6d7",
+  storageBucket: "worklog-test-3d6d7.firebasestorage.app",
+  messagingSenderId: "473809303523",
+  appId: "1:473809303523:web:e9bbd9ab24a401c60652d6"
 };
+const {userScope, canWrite, employeeRows} = WorklogAccounts;
+let activeUser = null, scope = null, isAdmin = null, authReady = false;
+let accountError = '', adminData = null, session = 0;
 let fbRef = null;
 let cloudSynced = false;
 let applyingRemote = false;
@@ -186,23 +191,24 @@ let pushTimer = null;
 let DB = loadDB();
 function loadDB(){
   try{
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = scope ? localStorage.getItem(scope.cache) : null;
     if(!raw) return {settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), days: {}, version: 1};
     const o = JSON.parse(raw);
     const s = Object.assign({}, DEFAULT_SETTINGS, o.settings||{});
     s.rates = Object.assign({1:280,2:322,3:350}, (o.settings&&o.settings.rates)||{});
-    return {settings:s, days: o.days||{}, version:1};
+    return {settings:s, days: o.days||{}, version:1, updatedAt:o.updatedAt||0};
   }catch(e){
     return {settings: JSON.parse(JSON.stringify(DEFAULT_SETTINGS)), days:{}, version:1};
   }
 }
 function saveDB(){
+  if(!canWrite(activeUser,isAdmin) || !scope) return;
   DB.updatedAt = Date.now();
-  localStorage.setItem(LS_KEY, JSON.stringify(DB));
+  localStorage.setItem(scope.cache, JSON.stringify(DB));
   scheduleCloudPush();
 }
 function saveDBLocal(){
-  localStorage.setItem(LS_KEY, JSON.stringify(DB));
+  if(canWrite(activeUser,isAdmin) && scope) localStorage.setItem(scope.cache, JSON.stringify(DB));
 }
 function canon(o){
   if(Array.isArray(o)) return o.map(canon);
@@ -214,19 +220,20 @@ function canon(o){
   return o;
 }
 function scheduleCloudPush(){
-  if(!fbRef) return;
+  if(!fbRef || !canWrite(activeUser,isAdmin)) return;
   clearTimeout(pushTimer);
   pushTimer = setTimeout(cloudPush, 400);
 }
 function cloudPush(){
-  if(!fbRef || applyingRemote) return;
+  if(!fbRef || applyingRemote || !canWrite(activeUser,isAdmin)) return;
   const payload = {
     settings: DB.settings,
     days: DB.days,
     version: 1,
-    updatedAt: Date.now()
+    updatedAt: DB.updatedAt || Date.now()
   };
-  fbRef.update(payload).catch(()=>{});
+  const current = session;
+  fbRef.set(payload).catch(()=>{if(current===session) toast('Не удалось синхронизировать данные');});
 }
 function normalizeRemote(remote){
   const s = Object.assign({}, DEFAULT_SETTINGS, remote.settings||{});
@@ -239,36 +246,56 @@ function adoptRemote(remote){
   saveDBLocal();
   applyingRemote = false;
 }
-function initFirebase(){
-  if(typeof firebase === 'undefined'){
-    console.warn('Firebase SDK не загружен');
-    return;
+function clearAccount(){
+  session++;
+  clearTimeout(pushTimer);
+  if(fbRef) fbRef.off();
+  fbRef = null; cloudSynced = false; applyingRemote = false;
+  activeUser = null; scope = null; isAdmin = null; adminData = null;
+  DB = loadDB(); state.tab='home'; state.editDate=null;
+}
+async function bindAccount(user){
+  clearAccount();
+  const current = session;
+  activeUser = user; scope = userScope(user); accountError=''; authReady=false;
+  if(!scope){authReady=true; render(); return;}
+  render();
+  try{
+    const role = await firebase.database().ref('admins/'+scope.uid).once('value');
+    if(current!==session) return;
+    isAdmin = role.val() === true;
+    if(isAdmin){
+      const snapshot = await firebase.database().ref('users').once('value');
+      if(current!==session) return;
+      adminData = snapshot.val() || {};
+    } else {
+      await firebase.database().ref('users/'+scope.uid+'/profile').set({email:user.email || ''});
+      if(current!==session) return;
+      DB=loadDB();
+      fbRef = firebase.database().ref(scope.path);
+      const snapshot = await fbRef.once('value');
+      if(current!==session) return;
+      cloudSynced=true; initialCloudSync(snapshot.val());
+      fbRef.on('value', snap=>{if(current===session) applyRemoteIfDifferent(snap.val());}, ()=>{if(current===session) toast('Синхронизация недоступна');});
+    }
+    authReady=true; render();
+  } catch(e){
+    if(current!==session) return;
+    accountError='Доступ к данным не настроен или нет связи. Повторите вход.';
+    authReady=true; isAdmin=null; render();
   }
+}
+function initFirebase(){
   try{
     firebase.initializeApp(firebaseConfig);
-    fbRef = firebase.database().ref('worklog');
-  }catch(e){
-    console.warn('Firebase init error', e);
-    return;
-  }
-  fbRef.on('value', snap => {
-    const remote = snap.val();
-    if(!cloudSynced){
-      cloudSynced = true;
-      initialCloudSync(remote);
-    } else {
-      applyRemoteIfDifferent(remote);
-    }
-  }, err => {
-    console.warn('Cloud sync error', err);
-    cloudSynced = true;
-  });
+    firebase.auth().onAuthStateChanged(bindAccount, ()=>{accountError='Ошибка входа'; authReady=true; render();});
+  }catch(e){accountError='Не удалось подключиться к Firebase. Проверьте интернет.'; authReady=true; render();}
 }
 function initialCloudSync(remote){
   const remoteDays = (remote && remote.days) ? remote.days : {};
   const localDays = DB.days || {};
-  const remoteHas = Object.keys(remoteDays).length > 0;
-  const localHas = Object.keys(localDays).length > 0;
+  const remoteHas = !!remote;
+  const localHas = Object.keys(localDays).length > 0 || DB.updatedAt>0;
   if(remoteHas && !localHas){
     adoptRemote(remote);
     toast('Данные загружены из облака');
@@ -289,9 +316,9 @@ function initialCloudSync(remote){
   }
 }
 function applyRemoteIfDifferent(remote){
-  if(!remote || !remote.days) return;
+  if(!remote) return;
   if(applyingRemote) return;
-  if(canon(remote.days||{}) === canon(DB.days||{}) && canon(remote.settings||{}) === canon(DB.settings||{})){
+  if(JSON.stringify(canon(remote.days||{})) === JSON.stringify(canon(DB.days||{})) && JSON.stringify(canon(remote.settings||{})) === JSON.stringify(canon(DB.settings||{}))){
     return;
   }
   adoptRemote(remote);
@@ -437,13 +464,14 @@ function toast(msg){
   setTimeout(()=>el.classList.remove('show'), 2000);
 }
 function confirmModal(title, text, okLabel='ОК'){
+  const current = session;
   return new Promise(res=>{
     const m=document.getElementById('modal');
     document.getElementById('mTitle').textContent=title;
     document.getElementById('mText').textContent=text;
     document.getElementById('mOk').textContent=okLabel;
     m.classList.add('show');
-    const ok=()=>{cleanup(); res(true);};
+    const ok=()=>{cleanup(); res(current===session && canWrite(activeUser,isAdmin));};
     const cancel=()=>{cleanup(); res(false);};
     function cleanup(){ m.classList.remove('show'); document.getElementById('mOk').removeEventListener('click',ok); document.getElementById('mCancel').removeEventListener('click',cancel); }
     document.getElementById('mOk').addEventListener('click',ok);
@@ -463,12 +491,91 @@ document.getElementById('btnAddToday').onclick = () => {
   state.editDate = ymd(today());
   render();
 };
+function renderLogin(app){
+  app.innerHTML=`<div class="card"><h2>Вход в Worklog Test</h2><p class="muted">Войдите в свой личный кабинет или зарегистрируйтесь.</p>
+  <form id="loginForm"><div class="input-group"><input id="loginEmail" type="email" autocomplete="username" placeholder=" " required><label>Электронная почта</label></div>
+  <div class="input-group"><input id="loginPassword" type="password" autocomplete="current-password" placeholder=" " required minlength="6"><label>Пароль</label></div>
+  <div style="display:grid;gap:10px"><button class="btn primary" type="submit">Войти</button><button class="btn ghost" type="button" id="registerBtn">Зарегистрироваться</button><button class="btn" type="button" id="resetBtn">Забыл пароль</button></div></form>
+  <p class="muted" id="loginStatus" role="status"></p></div>`;
+  const form=document.getElementById('loginForm'), status=document.getElementById('loginStatus');
+  status.textContent=accountError;
+  async function submit(mode){
+    const email=document.getElementById('loginEmail'), password=document.getElementById('loginPassword');
+    if(!email.reportValidity() || (mode!=='reset' && !password.reportValidity())) return;
+    const buttons=Array.from(form.querySelectorAll('button')); buttons.forEach(b=>b.disabled=true);
+    status.textContent='Подключение…';
+    try{
+      if(mode==='reset'){
+        await firebase.auth().sendPasswordResetEmail(email.value.trim());
+        status.textContent='Если аккаунт существует, письмо для восстановления отправлено.';
+      } else if(mode==='register') await firebase.auth().createUserWithEmailAndPassword(email.value.trim(),password.value);
+      else await firebase.auth().signInWithEmailAndPassword(email.value.trim(), password.value);
+    }catch(e){status.textContent=mode==='reset' ? 'Не удалось отправить письмо. Проверьте адрес и связь.' : 'Не удалось выполнить вход или регистрацию. Проверьте почту и пароль.';}
+    finally {buttons.forEach(b=>b.disabled=false);}
+  }
+  form.onsubmit=e=>{e.preventDefault(); submit('login');};
+  document.getElementById('registerBtn').onclick=()=>submit('register');
+  document.getElementById('resetBtn').onclick=()=>submit('reset');
+}
+function renderAdmin(app){
+  app.replaceChildren();
+  const card=document.createElement('div'); card.className='card'; app.appendChild(card);
+  const title=document.createElement('h2'); title.textContent='Сотрудники — только просмотр'; card.appendChild(title);
+  const rows=employeeRows(adminData);
+  const count=document.createElement('p'); count.className='muted'; count.textContent='Сотрудников: '+rows.length; card.appendChild(count);
+  const refresh=document.createElement('button'); refresh.className='btn ghost'; refresh.textContent='Обновить'; card.appendChild(refresh);
+  refresh.onclick=async()=>{
+    const current=session;
+    refresh.disabled=true;
+    try{
+      const snapshot=await firebase.database().ref('users').once('value');
+      if(current===session && isAdmin===true){adminData=snapshot.val()||{};render();}
+    }catch(e){if(current===session) toast('Не удалось обновить список');}
+    finally{refresh.disabled=false;}
+  };
+  function detail(container, label, value){
+    const p=document.createElement('p'); p.textContent=label+': '+(value==null?'—':String(value)); container.appendChild(p);
+  }
+  for(const row of rows){
+    const item=document.createElement('details'); item.className='card'; app.appendChild(item);
+    const summary=document.createElement('summary'); summary.textContent=row.email+' — дней: '+row.days.length; item.appendChild(summary);
+    const settings=document.createElement('details'); item.appendChild(settings);
+    const s=document.createElement('summary'); s.textContent='Настройки и тарифы'; settings.appendChild(s);
+    const pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere'; pre.textContent=JSON.stringify(row.settings,null,2); settings.appendChild(pre);
+    for(const [date,day] of row.days){
+      const d=document.createElement('details'); d.style.marginTop='12px'; item.appendChild(d);
+      const heading=document.createElement('summary'); heading.textContent=date; d.appendChild(heading);
+      for(const [label,block] of [['Основная смена',day?.main],['Подработка 1',day?.pod?.s1],['Подработка 2',day?.pod?.s2]]){
+        if(!block || !block.hours) continue;
+        const h=document.createElement('h3'); h.textContent=label; d.appendChild(h);
+        detail(d,'Часы',block.hours); detail(d,'Рейс',block.route); detail(d,'Отправление',block.departure); detail(d,'После',block.after?'да':'нет');
+      }
+      const raw=document.createElement('pre'); raw.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere'; raw.textContent=JSON.stringify(day,null,2); d.appendChild(raw);
+    }
+  }
+}
+document.getElementById('btnLogout').onclick=async()=>{
+  if(fbRef && pushTimer){clearTimeout(pushTimer); cloudPush();}
+  clearAccount(); authReady=false; render();
+  try{await firebase.auth().signOut();}catch(e){bindAccount(firebase.auth().currentUser);}
+};
 function render(){
   const app = document.getElementById('app');
   const hTitle = document.getElementById('hTitle');
   const hSub = document.getElementById('hSub');
   const btnAdd = document.getElementById('btnAddToday');
   btnAdd.style.display = 'none';
+  const employee = authReady && canWrite(activeUser,isAdmin) && !accountError;
+  document.getElementById('nav').style.display = employee ? 'flex' : 'none';
+  document.getElementById('btnLogout').style.display = activeUser ? 'inline-flex' : 'none';
+  if(!employee){
+    hTitle.textContent = 'Worklog Test';
+    hSub.textContent = activeUser ? (activeUser.email || '') : 'Тестовая версия';
+    if(!authReady){app.textContent='Подключение…'; return;}
+    if(activeUser && isAdmin===true && !accountError){renderAdmin(app); return;}
+    if(activeUser){app.textContent=accountError || 'Доступ недоступен'; return;}
+    renderLogin(app); return;
+  }
   if(state.tab==='home' && state.editDate){
     hTitle.textContent='Заполнить день';
     hSub.textContent = formatDateLong(parseYmd(state.editDate));
@@ -904,8 +1011,10 @@ function bindSettings(){
   };
   document.getElementById('impBtn').onclick=()=>document.getElementById('impFile').click();
   document.getElementById('impFile').onchange=async (e)=>{
+    const current=session;
     const f=e.target.files[0]; if(!f) return;
     const txt = await f.text();
+    if(current!==session || !canWrite(activeUser,isAdmin)) return;
     try{ const obj=JSON.parse(txt); if(!obj.days) throw 0;
       if(await confirmModal('Импорт','Текущие данные будут заменены.','Заменить')){
         DB = {settings:Object.assign({}, DEFAULT_SETTINGS, obj.settings||{}), days:obj.days};
@@ -915,10 +1024,11 @@ function bindSettings(){
   };
   document.getElementById('wipeBtn').onclick=async ()=>{
     if(await confirmModal('Удалить всё?','Все записи будут стёрты безвозвратно.','Удалить')){
-      localStorage.removeItem(LS_KEY);
+      if(!canWrite(activeUser,isAdmin) || !scope) return;
+      localStorage.removeItem(scope.cache);
       DB = loadDB();
       clearTimeout(pushTimer);
-      if(fbRef) fbRef.remove().catch(()=>{});
+      saveDB();
       toast('Данные удалены'); render();
     }
   };
@@ -952,3 +1062,4 @@ document.getElementById('btnTheme').onclick = () => {
 </script>
 </body>
 </html>
+

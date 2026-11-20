@@ -1,9 +1,10 @@
 {
-  "appId": "com.worklog.app",
-  "appName": "Worklog",
+  "appId": "com.worklog.app.test",
+  "appName": "Worklog Test",
   "webDir": "www",
   "bundledWebRuntime": false,
   "android": {
     "allowMixedContent": false
   }
 }
+

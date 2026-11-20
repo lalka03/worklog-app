@@ -5,7 +5,8 @@
   "description": "Учёт работы — нативное приложение на Capacitor",
   "scripts": {
     "cap:add": "cap add android",
-    "cap:sync": "cap sync android"
+    "cap:sync": "cap sync android",
+    "test": "node --test"
   },
   "dependencies": {
     "@capacitor/android": "^6.0.0",
@@ -15,3 +16,4 @@
     "@capacitor/share": "^6.0.0"
   }
 }
+
