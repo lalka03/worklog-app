@@ -1,6 +1,6 @@
 {
-  "appId": "com.worklog.app.test",
-  "appName": "Worklog Test",
+  "appId": "com.worklog.app.yandex.test",
+  "appName": "Worklog Yandex Test",
   "webDir": "www",
   "bundledWebRuntime": false,
   "android": {

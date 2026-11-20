@@ -28,8 +28,10 @@ test('administrator summaries include employees even with no records', () => {
 });
 test('test Android package is distinct from the installed production app', () => {
   const config = JSON.parse(fs.readFileSync('capacitor.config.json','utf8'));
-  assert.equal(config.appId, 'com.worklog.app.test');
-  assert.equal(config.appName, 'Worklog Test');
+  assert.equal(config.appId, 'com.worklog.app.yandex.test');
+  assert.equal(config.appName, 'Worklog Yandex Test');
+  assert.equal(config.webDir, 'www');
+  assert.equal(config.android.allowMixedContent, false);
 });
 
 
