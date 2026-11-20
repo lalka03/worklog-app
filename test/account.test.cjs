@@ -11,9 +11,9 @@ test('two authenticated employees have separate remote and local stores', () => 
   assert.deepEqual(userScope({uid:'a'}), { uid:'a', path:'users/a/worklog', cache:'worklog.test.v1:a' });
   assert.deepEqual(userScope({uid:'b'}), { uid:'b', path:'users/b/worklog', cache:'worklog.test.v1:b' });
 });
-test('only a signed-in employee can write their own store', () => {
+test('both signed-in roles can write their own store after role resolution', () => {
   assert.equal(canWrite({uid:'a'}, false), true);
-  assert.equal(canWrite({uid:'a'}, true), false);
+  assert.equal(canWrite({uid:'a'}, true), true);
   assert.equal(canWrite(null, false), false);
   assert.equal(canWrite({uid:'a'}, null), false);
 });

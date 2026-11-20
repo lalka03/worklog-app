@@ -144,6 +144,10 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V10M18 20V4M6 20v-4"/></svg>
     Итоги
   </button>
+  <button data-tab="employees" id="navEmployees" style="display:none">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M2 20v-2a7 7 0 0 1 14 0v2M17 5a3 3 0 0 1 0 6M22 20v-2a6 6 0 0 0-4-6"/></svg>
+    Сотрудники
+  </button>
   <button data-tab="settings">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
     Настройки
@@ -252,6 +256,7 @@ function clearAccount(){
   if(fbRef) fbRef.off();
   fbRef = null; cloudSynced = false; applyingRemote = false;
   activeUser = null; scope = null; isAdmin = null; adminData = null;
+  employeeView = newEmployeeView(); employeesLoading = false; employeesError = '';
   DB = loadDB(); state.tab='home'; state.editDate=null;
 }
 async function bindAccount(user){
@@ -264,20 +269,14 @@ async function bindAccount(user){
     const role = await firebase.database().ref('admins/'+scope.uid).once('value');
     if(current!==session) return;
     isAdmin = role.val() === true;
-    if(isAdmin){
-      const snapshot = await firebase.database().ref('users').once('value');
-      if(current!==session) return;
-      adminData = snapshot.val() || {};
-    } else {
-      await firebase.database().ref('users/'+scope.uid+'/profile').set({email:user.email || ''});
-      if(current!==session) return;
-      DB=loadDB();
-      fbRef = firebase.database().ref(scope.path);
-      const snapshot = await fbRef.once('value');
-      if(current!==session) return;
-      cloudSynced=true; initialCloudSync(snapshot.val());
-      fbRef.on('value', snap=>{if(current===session) applyRemoteIfDifferent(snap.val());}, ()=>{if(current===session) toast('Синхронизация недоступна');});
-    }
+    await firebase.database().ref('users/'+scope.uid+'/profile').set({email:user.email || ''});
+    if(current!==session) return;
+    DB=loadDB();
+    fbRef = firebase.database().ref(scope.path);
+    const snapshot = await fbRef.once('value');
+    if(current!==session) return;
+    cloudSynced=true; initialCloudSync(snapshot.val());
+    fbRef.on('value', snap=>{if(current===session) applyRemoteIfDifferent(snap.val());}, ()=>{if(current===session) toast('Синхронизация недоступна');});
     authReady=true; render();
   } catch(e){
     if(current!==session) return;
@@ -348,11 +347,11 @@ function parseTimeToFrac(str){
   if(h<0||h>23||mi<0||mi>59) return null;
   return (h*60+mi)/1440;
 }
-function shiftByDate(d){
-  const a = parseYmd(DB.settings.anchor);
+function shiftByDate(d, settings=DB.settings){
+  const a = parseYmd(settings.anchor);
   const day1 = new Date(d.getFullYear(), d.getMonth(), d.getDate());
   const diff = Math.round((day1 - a)/86400000);
-  const p1=+DB.settings.p1, p2=+DB.settings.p2, p3=+DB.settings.p3;
+  const p1=+settings.p1, p2=+settings.p2, p3=+settings.p3;
   const cycle=p1+p2+p3;
   let m = ((diff % cycle) + cycle) % cycle;
   if(m < p1) return 1;
@@ -361,8 +360,7 @@ function shiftByDate(d){
 }
 const shiftLabel = s => s===1?'Смена 1':(s===2?'Смена 2':'Выходной');
 const shiftClass = s => s===1?'s1':(s===2?'s2':'off');
-function calcBlock(block, smena, isPod){
-  const s = DB.settings;
+function calcBlock(block, smena, isPod, s=DB.settings){
   const out = {hours:0, rate:0, earned:0, waitH:0, waitR:0, after:false, valid:false};
   if(!block) return out;
   const hours = Number(block.hours);
@@ -387,11 +385,11 @@ function calcBlock(block, smena, isPod){
   out.after = !!block.after;
   return out;
 }
-function calcDay(dayObj){
+function calcDay(dayObj, settings=DB.settings){
   if(!dayObj) return null;
   const date = parseYmd(dayObj.date);
   const isLast = sameDay(date, lastDayOfMonth(date));
-  const shift = shiftByDate(date);
+  const shift = shiftByDate(date, settings);
   const isVyh = shift==='off';
   const res = {
     date: dayObj.date, shift, isVyh,
@@ -399,21 +397,21 @@ function calcDay(dayObj){
     totalHours: 0, totalEarned: 0, totalWaitH: 0, totalWaitR: 0
   };
   if(!isVyh && dayObj.main && dayObj.main.hours){
-    const c = calcBlock(dayObj.main, shift, false);
+    const c = calcBlock(dayObj.main, shift, false, settings);
     if(c.valid){ c.after = !!dayObj.main.after && isLast; res.mainCalc = c; }
   }
   if(isVyh){
     ['s1','s2'].forEach(k=>{
       const b = dayObj.pod && dayObj.pod[k];
       if(b && b.hours){
-        const c = calcBlock(b, k==='s1'?1:2, true);
+        const c = calcBlock(b, k==='s1'?1:2, true, settings);
         if(c.valid){ c.after = !!b.after && isLast; res.podCalc[k]=c; }
       }
     });
   } else {
     const b = dayObj.pod && dayObj.pod.s1;
     if(b && b.hours){
-      const c = calcBlock(b, shift===1?2:1, true);
+      const c = calcBlock(b, shift===1?2:1, true, settings);
       if(c.valid){ c.after = !!b.after && isLast; res.podCalc.s1=c; }
     }
   }
@@ -439,15 +437,15 @@ function accountingMonth(dateStr, after){
   }
   return {y:d.getFullYear(), m:d.getMonth()};
 }
-function monthSummary(y, m){
+function monthSummary(y, m, data=DB){
   let total=0, hours=0, filled=0;
   const n=daysInMonth(y,m);
   for(let day=1; day<=n; day++){
     const d=new Date(y,m,day);
     const key=ymd(d);
-    const rec=DB.days[key];
+    const rec=data.days[key];
     if(!rec) continue;
-    const c=calcDay(rec);
+    const c=calcDay(rec,data.settings);
     if(!c) continue;
     if(c.totalHours>0 || c.totalEarned>0){
       filled++;
@@ -458,6 +456,8 @@ function monthSummary(y, m){
   return {total:round2(total), hours:round2(hours), filled, days:n};
 }
 let state = { tab: 'home', viewYear: today().getFullYear(), viewMonth: today().getMonth(), editDate: null };
+function newEmployeeView(){return {uid:null,year:today().getFullYear(),month:today().getMonth(),date:null,mode:'calendar'};}
+let employeeView = newEmployeeView(), employeesLoading = false, employeesError = '';
 function toast(msg){
   const el=document.getElementById('toast');
   el.textContent=msg; el.classList.add('show');
@@ -479,9 +479,11 @@ function confirmModal(title, text, okLabel='ОК'){
   });
 }
 function setTab(t){
+  if(t==='employees' && (!authReady || isAdmin!==true || accountError)) return;
   state.tab=t; state.editDate=null;
   document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active', b.dataset.tab===t));
   render(); window.scrollTo({top:0, behavior:'instant'});
+  if(t==='employees') refreshEmployees();
 }
 document.getElementById('nav').addEventListener('click', e=>{
   const b = e.target.closest('button[data-tab]');
@@ -517,42 +519,114 @@ function renderLogin(app){
   document.getElementById('registerBtn').onclick=()=>submit('register');
   document.getElementById('resetBtn').onclick=()=>submit('reset');
 }
+async function refreshEmployees(){
+  if(!authReady || isAdmin!==true || !scope || accountError || employeesLoading) return;
+  const current=session;
+  employeesLoading=true; employeesError='';
+  if(state.tab==='employees') render();
+  try{
+    const snapshot=await firebase.database().ref('users').once('value');
+    if(current!==session || isAdmin!==true) return;
+    adminData=snapshot.val()||{};
+    if(employeeView.uid && !Object.prototype.hasOwnProperty.call(adminData,employeeView.uid)) employeeView=newEmployeeView();
+  }catch(e){
+    if(current===session){
+      employeesError='Не удалось загрузить сотрудников. Повторите попытку.';
+      if(String(e?.code||'').toLowerCase().replace(/-/g,'_').includes('permission_denied')){
+        adminData=null;employeeView=newEmployeeView();isAdmin=false;
+        if(state.tab==='employees'){state.tab='home';render();toast('Доступ к сотрудникам отозван');}
+      }
+    }
+  }
+  finally{
+    if(current===session){
+      employeesLoading=false;
+      if(state.tab==='employees') render();
+    }
+  }
+}
+function selectEmployee(uid){
+  if(isAdmin!==true || !authReady || !adminData || uid===scope?.uid || !Object.prototype.hasOwnProperty.call(adminData,uid)) return;
+  employeeView={...newEmployeeView(),uid};
+  render();
+}
+function employeeWorklog(row){
+  const data=normalizeRemote({settings:row.settings,days:{}});
+  const s=data.settings;
+  const validDate=value=>typeof value==='string' && /^\d{4}-\d{2}-\d{2}$/.test(value) && ymd(parseYmd(value))===value;
+  if(!validDate(s.anchor)) s.anchor=DEFAULT_SETTINGS.anchor;
+  const validNumber=(v)=> (typeof v==='number'||typeof v==='string') && String(v).trim()!=='' && Number.isFinite(Number(v)) && Number(v)>=0;
+  for(const key of ['p1','p2','p3','th1','th2','coef']) if(!validNumber(s[key])) s[key]=DEFAULT_SETTINGS[key];
+  if(+s.p1 + +s.p2 + +s.p3===0) for(const key of ['p1','p2','p3']) s[key]=DEFAULT_SETTINGS[key];
+  for(const key of [1,2,3]) if(!validNumber(s.rates[key])) s.rates[key]=DEFAULT_SETTINGS.rates[key];
+  const cleanBlock=b=>b && typeof b==='object' ? {hours:validNumber(b.hours)?b.hours:0,route:validNumber(b.route)?b.route:0,departure:typeof b.departure==='string'?b.departure:'',after:b.after===true}:null;
+  for(const [date,day] of row.days){
+    if(!validDate(date) || !day || typeof day!=='object') continue;
+    data.days[date]={date,main:cleanBlock(day.main),pod:{s1:cleanBlock(day.pod?.s1),s2:cleanBlock(day.pod?.s2)}};
+  }
+  return data;
+}
 function renderAdmin(app){
   app.replaceChildren();
   const card=document.createElement('div'); card.className='card'; app.appendChild(card);
-  const title=document.createElement('h2'); title.textContent='Сотрудники — только просмотр'; card.appendChild(title);
-  const rows=employeeRows(adminData);
-  const count=document.createElement('p'); count.className='muted'; count.textContent='Сотрудников: '+rows.length; card.appendChild(count);
-  const refresh=document.createElement('button'); refresh.className='btn ghost'; refresh.textContent='Обновить'; card.appendChild(refresh);
-  refresh.onclick=async()=>{
-    const current=session;
-    refresh.disabled=true;
-    try{
-      const snapshot=await firebase.database().ref('users').once('value');
-      if(current===session && isAdmin===true){adminData=snapshot.val()||{};render();}
-    }catch(e){if(current===session) toast('Не удалось обновить список');}
-    finally{refresh.disabled=false;}
-  };
-  function detail(container, label, value){
-    const p=document.createElement('p'); p.textContent=label+': '+(value==null?'—':String(value)); container.appendChild(p);
+  const title=document.createElement('h2'); title.textContent='Сотрудники · только просмотр'; card.appendChild(title);
+  const rows=employeeRows(adminData).filter(row=>row.uid!==scope.uid);
+  const row=rows.find(row=>row.uid===employeeView.uid);
+  const caption=document.createElement('p'); caption.className='muted';
+  caption.textContent=employeesError || (employeesLoading?'Загрузка…':row?row.email:'Сотрудников: '+rows.length);
+  caption.style.overflowWrap='anywhere'; card.appendChild(caption);
+  function button(label,action){
+    const b=document.createElement('button'); b.className='btn ghost'; b.textContent=label; b.onclick=action; return b;
   }
-  for(const row of rows){
-    const item=document.createElement('details'); item.className='card'; app.appendChild(item);
-    const summary=document.createElement('summary'); summary.textContent=row.email+' — дней: '+row.days.length; item.appendChild(summary);
-    const settings=document.createElement('details'); item.appendChild(settings);
-    const s=document.createElement('summary'); s.textContent='Настройки и тарифы'; settings.appendChild(s);
-    const pre=document.createElement('pre'); pre.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere'; pre.textContent=JSON.stringify(row.settings,null,2); settings.appendChild(pre);
-    for(const [date,day] of row.days){
-      const d=document.createElement('details'); d.style.marginTop='12px'; item.appendChild(d);
-      const heading=document.createElement('summary'); heading.textContent=date; d.appendChild(heading);
-      for(const [label,block] of [['Основная смена',day?.main],['Подработка 1',day?.pod?.s1],['Подработка 2',day?.pod?.s2]]){
-        if(!block || !block.hours) continue;
-        const h=document.createElement('h3'); h.textContent=label; d.appendChild(h);
-        detail(d,'Часы',block.hours); detail(d,'Рейс',block.route); detail(d,'Отправление',block.departure); detail(d,'После',block.after?'да':'нет');
-      }
-      const raw=document.createElement('pre'); raw.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere'; raw.textContent=JSON.stringify(day,null,2); d.appendChild(raw);
+  const actions=document.createElement('div'); actions.style.cssText='display:flex;gap:8px;flex-wrap:wrap'; card.appendChild(actions);
+  const refresh=button('Обновить',refreshEmployees); refresh.disabled=employeesLoading; actions.appendChild(refresh);
+  if(!row){
+    for(const item of rows){
+      const b=button(item.email+' · дней: '+item.days.length,()=>selectEmployee(item.uid));
+      b.className='card'; b.style.cssText='width:100%;text-align:left;color:var(--txt);font:inherit;overflow-wrap:anywhere;cursor:pointer';
+      app.appendChild(b);
     }
+    if(!rows.length && adminData && !employeesLoading && !employeesError){
+      const p=document.createElement('p'); p.className='muted'; p.textContent='Других сотрудников пока нет.'; app.appendChild(p);
+    }
+    return;
   }
+  actions.appendChild(button('К списку',()=>{employeeView=newEmployeeView();render();}));
+  actions.appendChild(button(employeeView.mode==='totals'?'Календарь':'Итоги',()=>{
+    employeeView.mode=employeeView.mode==='totals'?'calendar':'totals'; employeeView.date=null; render();
+  }));
+  const data=employeeWorklog(row);
+  const body=document.createElement('div'); app.appendChild(body);
+  if(employeeView.mode==='totals'){body.innerHTML=renderTotals(data);return;}
+  if(employeeView.date){
+    body.appendChild(button('Назад к календарю',()=>{employeeView.date=null;render();}));
+    const info=document.createElement('div'); info.className='card'; body.appendChild(info);
+    function detail(label,value){
+      const p=document.createElement('p'); p.textContent=label+': '+String(value??'—'); info.appendChild(p);
+    }
+    const date=employeeView.date, day=data.days[date];
+    const h=document.createElement('h2'); h.textContent=formatDateLong(parseYmd(date)); info.appendChild(h);
+    detail('График',shiftLabel(shiftByDate(parseYmd(date),data.settings)));
+    if(!day){detail('Запись','Нет записи');return;}
+    const calc=calcDay(day,data.settings);
+    for(const [label,block,amount] of [['Основная смена',day.main,calc?.mainCalc],['Подработка 1',day.pod?.s1,calc?.podCalc.s1],['Подработка 2',day.pod?.s2,calc?.podCalc.s2]]){
+      if(!block || !block.hours) continue;
+      const heading=document.createElement('h3'); heading.textContent=label; info.appendChild(heading);
+      detail('Часы',block.hours); detail('Рейс',block.route); detail('Отправление',block.departure);
+      if(amount){detail('Ставка',fmt2(amount.rate)+' ₽/ч');detail('Заработок',fmt2(amount.earned)+' ₽');detail('Ожидание',fmtHours(amount.waitH)+' ч / '+fmt2(amount.waitR)+' ₽');}
+      detail('В следующий месяц',block.after?'Да':'Нет');
+    }
+    if(calc) detail('Итого',fmt2(calc.totalEarned+calc.totalWaitR)+' ₽');
+    return;
+  }
+  body.innerHTML=renderHome(data,employeeView.year,employeeView.month);
+  function moveMonth(delta){
+    const date=new Date(employeeView.year,employeeView.month+delta,1);
+    employeeView.year=date.getFullYear();employeeView.month=date.getMonth();render();
+  }
+  body.querySelector('#prevM').onclick=()=>moveMonth(-1);
+  body.querySelector('#nextM').onclick=()=>moveMonth(1);
+  body.querySelectorAll('.day-item[data-date]').forEach(el=>{el.onclick=()=>{employeeView.date=el.dataset.date;render();};});
 }
 document.getElementById('btnLogout').onclick=async()=>{
   if(fbRef && pushTimer){clearTimeout(pushTimer); cloudPush();}
@@ -567,14 +641,21 @@ function render(){
   btnAdd.style.display = 'none';
   const employee = authReady && canWrite(activeUser,isAdmin) && !accountError;
   document.getElementById('nav').style.display = employee ? 'flex' : 'none';
+  document.getElementById('navEmployees').style.display = employee && isAdmin===true ? 'flex' : 'none';
+  document.querySelectorAll('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.tab===state.tab));
   document.getElementById('btnLogout').style.display = activeUser ? 'inline-flex' : 'none';
   if(!employee){
     hTitle.textContent = 'Worklog Test';
     hSub.textContent = activeUser ? (activeUser.email || '') : 'Тестовая версия';
     if(!authReady){app.textContent='Подключение…'; return;}
-    if(activeUser && isAdmin===true && !accountError){renderAdmin(app); return;}
     if(activeUser){app.textContent=accountError || 'Доступ недоступен'; return;}
     renderLogin(app); return;
+  }
+  if(state.tab==='employees'){
+    if(isAdmin!==true){state.tab='home';render();return;}
+    hTitle.textContent='Сотрудники';
+    hSub.textContent='Только просмотр';
+    renderAdmin(app);return;
   }
   if(state.tab==='home' && state.editDate){
     hTitle.textContent='Заполнить день';
@@ -606,21 +687,20 @@ function render(){
   }
 }
 function formatDateLong(d){ return d.getDate()+' '+MONTHS[d.getMonth()]+' '+d.getFullYear()+' ('+WD[d.getDay()]+')'; }
-function renderHome(){
-  const y=state.viewYear, m=state.viewMonth;
+function renderHome(data=DB,y=state.viewYear,m=state.viewMonth){
   const n=daysInMonth(y,m);
   const t=today();
-  const sum=monthSummary(y,m);
+  const sum=monthSummary(y,m,data);
   const pct = sum.days ? Math.round(sum.filled/sum.days*100) : 0;
   let rows='';
   for(let day=1; day<=n; day++){
     const d=new Date(y,m,day);
     const key=ymd(d);
-    const sh=shiftByDate(d);
-    const rec=DB.days[key];
+    const sh=shiftByDate(d,data.settings);
+    const rec=data.days[key];
     let brief='';
     if(rec){
-      const c=calcDay(rec);
+      const c=calcDay(rec,data.settings);
       if(c){
         const lines=[];
         if(c.mainCalc) lines.push(`<div><span>Осн: ${fmtHours(c.mainCalc.hours)} ч</span> <span class="val">${fmt2(c.mainCalc.earned)} ₽</span></div>`);
@@ -828,16 +908,16 @@ function saveForm(){
   if(!hasP2) delete obj.pod.s2;
   DB.days[obj.date]=obj; saveDB(); state.editDate=null; render(); toast('Сохранено');
 }
-function aggregate(){
+function aggregate(data=DB){
   const map = new Map();
   function ensure(y,m){
     const k=y+'-'+m;
     if(!map.has(k)) map.set(k,{y,m,hMain:0,earnMain:0,wHMain:0,wRMain:0,hPod:0,earnPod:0,wHPod:0,wRPod:0});
     return map.get(k);
   }
-  Object.values(DB.days).forEach(day=>{
+  Object.values(data.days).forEach(day=>{
     if(!day || !day.date) return;
-    const c=calcDay(day);
+    const c=calcDay(day,data.settings);
     if(!c) return;
     const d=parseYmd(day.date);
     const isLast = sameDay(d, lastDayOfMonth(d));
@@ -864,9 +944,9 @@ function aggregate(){
     total: round2(r.earnMain + r.wRMain + r.earnPod + r.wRPod)
   })).sort((a,b)=> a.y===b.y ? a.m-b.m : a.y-b.y);
 }
-function renderTotals(){
-  const list=aggregate();
-  if(!list.length) return `<div class="card" style="text-align:center; padding:40px 16px;"><div class="muted">Пока нет данных для отображения.<br>Заполните дни на Главной.</div></div>`;
+function renderTotals(data=DB){
+  const list=aggregate(data);
+  if(!list.length) return `<div class="card" style="text-align:center; padding:40px 16px;"><div class="muted">Пока нет данных для отображения.${data===DB?'<br>Заполните дни на Главной.':''}</div></div>`;
   const grand = list.reduce((acc,r)=>{
     acc.hMain+=r.hMain; acc.earnMain+=r.earnMain; acc.wHMain+=r.wHMain; acc.wRMain+=r.wRMain;
     acc.hPod+=r.hPod; acc.earnPod+=r.earnPod; acc.wHPod+=r.wHPod; acc.wRPod+=r.wRPod; acc.total+=r.total;
