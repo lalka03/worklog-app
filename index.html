@@ -864,9 +864,45 @@ function bindSettings(){
     };
     saveDB(); toast('Настройки сохранены'); render();
   };
-  document.getElementById('expBtn').onclick=()=>{
-    const blob = new Blob([JSON.stringify({settings:DB.settings, days:DB.days}, null, 2)], {type:'application/json'});
-    const a = document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='worklog_backup.json'; a.click();
+  document.getElementById('expBtn').onclick=async (event)=>{
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+      const data = JSON.stringify({version:1, settings:DB.settings, days:DB.days}, null, 2);
+      const count = Object.keys(DB.days).length;
+      const filename = 'worklog_backup_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+      const cap = window.Capacitor;
+      if (cap && cap.isNativePlatform()) {
+        const {Filesystem, Share} = cap.Plugins || {};
+        if (!Filesystem || !Share) throw new Error('Native export plugins unavailable');
+        const file = await Filesystem.writeFile({
+          path: filename, data, directory: 'CACHE', encoding: 'utf8'
+        });
+        if (!file.uri) throw new Error('Missing exported file URI');
+        // Android's chooser opens only after the user requests export.
+        await Share.share({
+          title: 'Резервная копия Worklog',
+          files: [file.uri],
+          dialogTitle: 'Сохранить или отправить копию (' + count + ' дн.)'
+        });
+      } else {
+        const blob = new Blob([data], {type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        try { a.click(); } finally {
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+      }
+    } catch (err) {
+      // Cancellation or a platform error must not mutate local or cloud data.
+      toast('Экспорт не завершён');
+    } finally {
+      button.disabled = false;
+    }
   };
   document.getElementById('impBtn').onclick=()=>document.getElementById('impFile').click();
   document.getElementById('impFile').onchange=async (e)=>{
