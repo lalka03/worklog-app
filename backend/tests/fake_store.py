@@ -3,9 +3,19 @@
 from copy import deepcopy
 from dataclasses import replace
 from threading import Lock
+from uuid import uuid4
 
-from backend.security import digest
-from backend.store import DuplicateAccountEmail
+from backend.security import digest, new_token
+from backend.store import DuplicateAccountEmail, Session
+
+
+def seed_test_session(store, account, now, access_token=None):
+    access_token = access_token or new_token()
+    store.run_write(lambda tx: tx.insert_session(Session(
+        str(uuid4()), account.uid, account.session_generation, digest(access_token), digest(new_token()),
+        now + 15 * 60, now + 7 * 24 * 60 * 60,
+    )))
+    return access_token
 
 
 class FakeStore:

@@ -1,12 +1,13 @@
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from functools import partial
 from threading import Barrier, Event
 
 from backend.security import new_token
-from backend.service import DomainError, Principal, Service, promote_owner, seed_owner_invite
+from backend.service import DomainError, Service, promote_owner, seed_owner_invite
 from backend.store import Account
-from fake_store import FakeStore
+from fake_store import FakeStore, seed_test_session
 
 
 PASSWORD = "sample password 123"
@@ -20,10 +21,9 @@ class AuthTest(unittest.TestCase):
         self.store = FakeStore()
         self.service = Service(self.store, clock=lambda: self.now)
         # The owner role is seeded by a privileged fixture, outside the public API.
-        self.owner = Principal(ADMIN_UID, "owner@example.test", "admin")
-        self.store.run_write(lambda tx: tx.insert_account(
-            Account(ADMIN_UID, self.owner.email, "unused-by-fixture", "admin", True, self.now, 0)
-        ))
+        self.owner_account = Account(ADMIN_UID, "owner@example.test", "unused-by-fixture", "admin", True, self.now, 0)
+        self.store.run_write(lambda tx: tx.insert_account(self.owner_account))
+        self.owner = self.service.authenticate(seed_test_session(self.store, self.owner_account, self.now))
 
     def assert_error(self, code, status, fn, *args):
         with self.assertRaises(DomainError) as error:
@@ -76,6 +76,7 @@ class AuthTest(unittest.TestCase):
     def test_expired_and_revoked_invites(self):
         expired = self.service.create_invite(self.owner)
         self.now += 7 * 24 * 60 * 60
+        self.owner = self.service.authenticate(seed_test_session(self.store, self.owner_account, self.now))
         revoked = self.service.create_invite(self.owner)
         self.service.revoke_invite(self.owner, revoked["id"])
         for result in (expired, revoked):
@@ -90,7 +91,7 @@ class AuthTest(unittest.TestCase):
         employee = self.service.authenticate(auth["accessToken"])
         self.assert_error("forbidden", 403, self.service.create_invite, employee)
         self.assert_error("forbidden", 403, self.service.create_invite,
-                          Principal(employee.uid, employee.email, "admin"))
+                          replace(employee, role="admin"))
         self.assert_error("forbidden", 403, self.service.list_invites, employee)
         self.assert_error("forbidden", 403, self.service.issue_reset, employee, ADMIN_UID)
 

@@ -6,7 +6,7 @@ from threading import Barrier
 from uuid import uuid4
 
 from backend.security import hash_password
-from backend.service import DomainError, Principal, Service
+from backend.service import DomainError, Service
 from backend.store import Account, YdbStore
 
 
@@ -24,10 +24,11 @@ class YdbIntegrationTest(unittest.TestCase):
         cls.service = Service(cls.store)
         uid = str(uuid4())
         email = f"owner-{uid}@example.test"
-        cls.owner = Principal(uid, email, "admin")
         cls.store.run_write(lambda tx: tx.insert_account(
             Account(uid, email, hash_password(PASSWORD), "admin", True, int(time.time()), 0)
         ))
+        auth = cls.service.login(email, PASSWORD, f"2001:db8::{uid[:4]}:{uid[4:8]}")
+        cls.owner = cls.service.authenticate(auth["accessToken"])
 
     def test_parallel_register_only_one_ydb_commit(self):
         invite = self.service.create_invite(self.owner)
@@ -80,8 +81,12 @@ class YdbIntegrationTest(unittest.TestCase):
         email = f"reset-{uuid4()}@example.test"
         auth = self.service.register(email, PASSWORD, invite["code"])
         rotated = self.service.renew(auth["refreshToken"])
+        stale_principal = self.service.authenticate(rotated["accessToken"])
         reset = self.service.issue_reset(self.owner, auth["user"]["uid"])
         self.service.redeem_reset(reset["code"], "synthetic replacement password")
+        with self.assertRaises(DomainError) as blocked_read:
+            self.service.get_worklog(stale_principal)
+        self.assertEqual(blocked_read.exception.code, "invalid_session")
         with self.assertRaises(DomainError) as invalid_access:
             self.service.authenticate(rotated["accessToken"])
         self.assertEqual(invalid_access.exception.code, "invalid_session")
@@ -91,3 +96,29 @@ class YdbIntegrationTest(unittest.TestCase):
         with self.assertRaises(DomainError) as invalid_reset:
             self.service.redeem_reset(reset["code"], PASSWORD)
         self.assertEqual(invalid_reset.exception.code, "invalid_reset")
+
+    def test_two_devices_competing_for_one_revision(self):
+        from test_worklog import snapshot
+
+        invite = self.service.create_invite(self.owner)
+        auth = self.service.register(f"race-{uuid4()}@example.test", PASSWORD, invite["code"])
+        employee = self.service.authenticate(auth["accessToken"])
+        start = Barrier(2)
+
+        def attempt(index):
+            start.wait(timeout=5)
+            try:
+                return self.service.put_worklog(employee, snapshot(str(index)), 0, f"device-{index}")
+            except DomainError as error:
+                self.assertEqual((error.code, error.status), ("stale_revision", 409))
+                return None
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(attempt, (1, 2)))
+        self.assertEqual(sum(result is not None for result in results), 1)
+        winner = 1 if results[0] is not None else 2
+        self.assertEqual(self.service.get_worklog(employee), {"data": snapshot(str(winner)), "revision": 1})
+        self.assertEqual(
+            self.service.put_worklog(employee, snapshot(str(winner)), 0, f"device-{winner}"),
+            results[winner - 1],
+        )

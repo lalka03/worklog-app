@@ -1,11 +1,13 @@
 """Account, invitation and session rules shared by the Worklog backend."""
 
 import ipaddress
+import json
+import re
 import time
-from dataclasses import dataclass, replace
-from datetime import datetime, timezone
-from typing import Callable, TypedDict
-from uuid import uuid4
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timezone
+from typing import Callable, NotRequired, TypedDict
+from uuid import UUID, uuid4
 
 from . import security
 from .store import (
@@ -13,10 +15,12 @@ from .store import (
     AuditEvent,
     DuplicateAccountEmail,
     Invitation,
+    Mutation,
     RateBin,
     Reset,
     Session,
     Store,
+    Worklog,
 )
 
 
@@ -26,6 +30,17 @@ INVITE_SECONDS = 7 * 24 * 60 * 60
 RESET_SECONDS = 60 * 60
 RATE_WINDOW = 15 * 60
 RATE_MAX = 10
+MAX_WORKLOG_BYTES = 512 * 1024
+EMPLOYEE_PAGE_SIZE = 3
+MAX_REVISION = 2**53 - 1
+MAX_SHIFT_HOURS = 168
+MAX_SETTING_VALUE = 1_000_000
+MAX_RATE = 1_000_000_000
+
+_MUTATION_ID = re.compile(r"[A-Za-z0-9_-]{1,128}", re.ASCII)
+_DECIMAL = re.compile(r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
+_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_TIME = re.compile(r"(?:[01]?[0-9]|2[0-3]):[0-5]?[0-9]")
 
 
 class DomainError(Exception):
@@ -46,6 +61,7 @@ class Principal:
     uid: str
     email: str
     role: str
+    _access_digest: str | None = field(default=None, repr=False, compare=False)
 
 
 class AuthResult(TypedDict):
@@ -66,12 +82,142 @@ class ResetResult(TypedDict):
     expiresAt: str
 
 
+class WorklogSnapshot(TypedDict):
+    data: dict | None
+    revision: int
+
+
+class WorklogSave(TypedDict):
+    revision: int
+    updatedAt: str
+
+
+class EmployeeProfile(TypedDict):
+    email: str
+
+
+class Employee(TypedDict):
+    profile: EmployeeProfile
+    worklog: dict | None
+
+
+class EmployeePage(TypedDict):
+    users: dict[str, Employee]
+    nextCursor: NotRequired[str]
+
+
 def utc_timestamp(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _id():
     return str(uuid4())
+
+
+def _valid_uid(value):
+    try:
+        return isinstance(value, str) and len(value) == 36 and str(UUID(value)) == value
+    except ValueError:
+        return False
+
+
+def _worklog_required(condition):
+    if not condition:
+        raise DomainError("invalid_worklog", 422)
+
+
+def _validate_date(value):
+    _worklog_required(isinstance(value, str) and _DATE.fullmatch(value))
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        raise DomainError("invalid_worklog", 422) from None
+
+
+def _bounded_number(value, maximum):
+    # Existing WebView forms and exports may represent numbers as strings.
+    if isinstance(value, str):
+        _worklog_required(len(value) <= 64 and _DECIMAL.fullmatch(value.strip()))
+        value = float(value)
+    _worklog_required(type(value) in (int, float) and 0 <= value <= maximum)
+    return value
+
+
+def _validate_shift(block):
+    if block is None:
+        return
+    _worklog_required(
+        isinstance(block, dict) and {"hours", "route"} <= block.keys() <= {"hours", "route", "departure", "after"}
+    )
+    _bounded_number(block["hours"], MAX_SHIFT_HOURS)
+    _worklog_required(_bounded_number(block["route"], 3) in (1, 2, 3))
+    departure = block.get("departure", "")
+    _worklog_required(
+        isinstance(departure, str) and len(departure) <= 16 and
+        (not departure.strip() or _TIME.fullmatch(departure.strip()))
+    )
+    _worklog_required(type(block.get("after", False)) is bool)
+
+
+def _validate_worklog(data):
+    _worklog_required(isinstance(data, dict) and data.keys() == {"days", "settings", "version"})
+    _worklog_required(type(data["version"]) is int and data["version"] == 1)
+    settings = data["settings"]
+    _worklog_required(
+        isinstance(settings, dict) and settings.keys() == {"anchor", "coef", "p1", "p2", "p3", "rates", "th1", "th2"}
+    )
+    _validate_date(settings["anchor"])
+    cycle = [_bounded_number(settings[key], MAX_SETTING_VALUE) for key in ("p1", "p2", "p3")]
+    _worklog_required(sum(cycle) > 0)
+    for key in ("th1", "th2", "coef"):
+        _bounded_number(settings[key], MAX_SETTING_VALUE)
+    rates = settings["rates"]
+    _worklog_required(isinstance(rates, dict) and rates.keys() == {"1", "2", "3"})
+    for rate in rates.values():
+        _bounded_number(rate, MAX_RATE)
+
+    days = data["days"]
+    _worklog_required(isinstance(days, dict))
+    for key, day in days.items():
+        _validate_date(key)
+        _worklog_required(
+            isinstance(day, dict) and day.keys() <= {"date", "main", "pod"} and day.get("date") == key
+        )
+        _validate_shift(day.get("main"))
+        pod = day.get("pod")
+        if pod is not None:
+            _worklog_required(isinstance(pod, dict) and pod.keys() <= {"s1", "s2"})
+            for block in pod.values():
+                _validate_shift(block)
+
+
+def _worklog_json(data):
+    _validate_worklog(data)
+    try:
+        encoded = json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        _worklog_required(len(encoded.encode("utf-8")) <= MAX_WORKLOG_BYTES)
+    except (ValueError, UnicodeError, RecursionError):
+        raise DomainError("invalid_worklog", 422) from None
+    return encoded
+
+
+def _source_ip(ip):
+    try:
+        if not isinstance(ip, str):
+            raise ValueError("missing source address")
+        address = ipaddress.ip_address(ip)
+        if isinstance(address, ipaddress.IPv6Address):
+            if address.scope_id:
+                raise ValueError("expected unscoped source address")
+            address = address.ipv4_mapped or address
+    except ValueError:
+        raise DomainError("invalid_credentials", 401) from None
+    return str(address)
+
+
+def _employee(tx, account):
+    worklog = tx.get_worklog(account.uid)
+    return Employee(profile=EmployeeProfile(email=account.email), worklog=worklog.data if worklog else None)
 
 
 def _audit(tx, action, actor_uid, target_id, now):
@@ -100,10 +246,6 @@ def _issue_invite(tx, action, issuer_uid, code, now):
 
 def _account_generation_matches(account, generation):
     return account is not None and account.enabled and account.session_generation == generation
-
-
-def _principal(account):
-    return Principal(account.uid, account.email, account.role)
 
 
 def _auth_result(account, access, refresh, session):
@@ -180,10 +322,29 @@ class Service:
     def _now(self):
         return int(self.clock())
 
+    def _account_for_access(self, tx, digest):
+        session = tx.get_session_by_access(digest)
+        if session is None or session.access_digest != digest or session.access_expires_at <= self._now():
+            raise DomainError("invalid_session", 401)
+        account = tx.get_account(session.uid)
+        if not _account_generation_matches(account, session.generation):
+            raise DomainError("invalid_session", 401)
+        return account
+
+    def _require_authenticated_account(self, tx, principal):
+        # Check the same bearer again inside the transaction that reads or changes data.
+        if not isinstance(principal, Principal) or not isinstance(principal._access_digest, str):
+            raise DomainError("invalid_session", 401)
+        account = self._account_for_access(tx, principal._access_digest)
+        if account.uid != principal.uid:
+            raise DomainError("invalid_session", 401)
+        return account
+
     def _require_admin(self, tx, principal):
-        account = tx.get_account(principal.uid)
-        if principal.role != "admin" or account is None or not account.enabled or account.role != "admin":
+        account = self._require_authenticated_account(tx, principal)
+        if account.role != "admin":
             raise DomainError("forbidden", 403)
+        return account
 
     def register(self, email: str, password: str, invite: str) -> AuthResult:
         normalized = security.normalize_email(email)
@@ -214,10 +375,12 @@ class Service:
         except DuplicateAccountEmail:
             raise DomainError("invalid_invite", 422) from None
 
-    def _charge_login(self, normalized_email, ip):
-        keys = [security.digest("ip:" + ip)]
+    def charge_auth_attempt(self, ip, *, scope="", email=None):
+        namespace = scope + ":" if scope else ""
+        keys = [security.digest(namespace + "ip:" + _source_ip(ip))]
+        normalized_email = security.normalize_email(email)
         if normalized_email is not None:
-            keys.append(security.digest("email:" + normalized_email))
+            keys.append(security.digest(namespace + "email:" + normalized_email))
 
         def charge(tx):
             now = self._now()
@@ -236,18 +399,8 @@ class Service:
         self.store.run_write(charge)
 
     def login(self, email: str, password: str, ip: str) -> AuthResult:
-        try:
-            if not isinstance(ip, str):
-                raise ValueError("missing source address")
-            address = ipaddress.ip_address(ip)
-            if isinstance(address, ipaddress.IPv6Address):
-                if address.scope_id:
-                    raise ValueError("expected unscoped source address")
-                address = address.ipv4_mapped or address
-        except ValueError:
-            raise DomainError("invalid_credentials", 401) from None
+        self.charge_auth_attempt(ip, email=email)
         normalized = security.normalize_email(email)
-        self._charge_login(normalized, str(address))
         if normalized is None or not security.valid_password(password):
             raise DomainError("invalid_credentials", 401)
 
@@ -272,13 +425,8 @@ class Service:
             raise DomainError("invalid_session", 401)
 
         def authenticate(tx):
-            session = tx.get_session_by_access(digest)
-            if session is None or session.access_digest != digest or session.access_expires_at <= self._now():
-                raise DomainError("invalid_session", 401)
-            account = tx.get_account(session.uid)
-            if not _account_generation_matches(account, session.generation):
-                raise DomainError("invalid_session", 401)
-            return _principal(account)
+            account = self._account_for_access(tx, digest)
+            return Principal(account.uid, account.email, account.role, _access_digest=digest)
 
         return self.store.run_read(authenticate)
 
@@ -305,13 +453,21 @@ class Service:
 
         return self.store.run_write(renew)
 
-    def logout(self, access_token: str) -> None:
+    def logout(self, access_token: str, *, require_session: bool = False) -> None:
         digest = security.credential_digest(access_token)
         if digest is None:
+            if require_session:
+                raise DomainError("invalid_session", 401)
             return
 
         def logout(tx):
             session = tx.get_session_by_access(digest)
+            if require_session and (
+                session is None or session.refresh_expires_at <= self._now() or
+                not _account_generation_matches(tx.get_account(session.uid), session.generation)
+            ):
+                raise DomainError("invalid_session", 401)
+            # An expired or rotated access token can still revoke its session.
             if session is not None:
                 tx.delete_session(session)
 
@@ -321,8 +477,8 @@ class Service:
         code = self.tokens()
 
         def create(tx):
-            self._require_admin(tx, principal)
-            return _issue_invite(tx, "invitation_created", principal.uid, code, self._now())
+            actor = self._require_admin(tx, principal)
+            return _issue_invite(tx, "invitation_created", actor.uid, code, self._now())
 
         return self.store.run_write(create)
 
@@ -343,7 +499,7 @@ class Service:
 
     def revoke_invite(self, principal: Principal, invite_id: str) -> None:
         def revoke(tx):
-            self._require_admin(tx, principal)
+            actor = self._require_admin(tx, principal)
             invitation = tx.get_invitation_by_id(invite_id)
             if invitation is None:
                 raise DomainError("not_found", 404)
@@ -353,7 +509,7 @@ class Service:
             if _invite_state(invitation, now) != "available":
                 raise DomainError("invite_unavailable", 409)
             tx.update_invitation(replace(invitation, state="revoked"))
-            _audit(tx, "invitation_revoked", principal.uid, invite_id, now)
+            _audit(tx, "invitation_revoked", actor.uid, invite_id, now)
 
         self.store.run_write(revoke)
 
@@ -361,14 +517,14 @@ class Service:
         code = self.tokens()
 
         def issue(tx):
-            self._require_admin(tx, principal)
+            actor = self._require_admin(tx, principal)
             account = tx.get_account(uid)
             if account is None or not account.enabled:
                 raise DomainError("not_found", 404)
             now = self._now()
-            reset = Reset(security.digest(code), uid, principal.uid, account.session_generation, now + RESET_SECONDS)
+            reset = Reset(security.digest(code), uid, actor.uid, account.session_generation, now + RESET_SECONDS)
             tx.insert_reset(reset)
-            _audit(tx, "password_reset_issued", principal.uid, uid, now)
+            _audit(tx, "password_reset_issued", actor.uid, uid, now)
             return ResetResult(code=code, expiresAt=utc_timestamp(reset.expires_at))
 
         return self.store.run_write(issue)
@@ -400,3 +556,70 @@ class Service:
             _audit(tx, "password_reset_redeemed", account.uid, account.uid, self._now())
 
         self.store.run_write(redeem)
+
+    def get_worklog(self, principal: Principal) -> WorklogSnapshot:
+        def read(tx):
+            account = self._require_authenticated_account(tx, principal)
+            worklog = tx.get_worklog(account.uid)
+            if worklog is None:
+                return WorklogSnapshot(data=None, revision=0)
+            return WorklogSnapshot(data=worklog.data, revision=worklog.revision)
+
+        return self.store.run_read(read)
+
+    def put_worklog(self, principal: Principal, data: dict, expected_revision: int, mutation_id: str) -> WorklogSave:
+        if type(expected_revision) is not int or not 0 <= expected_revision <= MAX_REVISION:
+            raise DomainError("invalid_revision", 422)
+        if not isinstance(mutation_id, str) or not _MUTATION_ID.fullmatch(mutation_id):
+            raise DomainError("invalid_mutation", 422)
+        encoded = _worklog_json(data)
+        request_digest = security.digest(f"{expected_revision}:{encoded}")
+        snapshot = json.loads(encoded)
+
+        def save(tx):
+            uid = self._require_authenticated_account(tx, principal).uid
+            previous = tx.get_mutation(uid, mutation_id)
+            if previous is not None:
+                if previous.request_digest != request_digest:
+                    raise DomainError("mutation_mismatch", 409)
+                return WorklogSave(revision=previous.revision, updatedAt=utc_timestamp(previous.updated_at))
+
+            current = tx.get_worklog(uid)
+            revision = current.revision if current else 0
+            if revision != expected_revision:
+                raise DomainError("stale_revision", 409)
+            if revision == MAX_REVISION:
+                raise DomainError("revision_limit", 409)
+
+            revision += 1
+            now = self._now()
+            tx.put_worklog(Worklog(uid, snapshot, revision, now))
+            tx.put_mutation(Mutation(uid, mutation_id, request_digest, revision, now))
+            _audit(tx, "worklog_updated", uid, uid, now)
+            return WorklogSave(revision=revision, updatedAt=utc_timestamp(now))
+
+        return self.store.run_write(save)
+
+    def list_employees(self, principal: Principal, cursor: str = "") -> EmployeePage:
+        def list_page(tx):
+            self._require_admin(tx, principal)
+            if cursor != "" and not _valid_uid(cursor):
+                raise DomainError("invalid_cursor", 422)
+            accounts = tx.list_accounts(cursor, EMPLOYEE_PAGE_SIZE + 1)
+            page = accounts[:EMPLOYEE_PAGE_SIZE]
+            result = EmployeePage(users={account.uid: _employee(tx, account) for account in page if account.enabled})
+            if len(accounts) > EMPLOYEE_PAGE_SIZE:
+                result["nextCursor"] = page[-1].uid
+            return result
+
+        return self.store.run_read(list_page)
+
+    def get_employee(self, principal: Principal, uid: str) -> Employee:
+        def read(tx):
+            self._require_admin(tx, principal)
+            account = tx.get_account(uid) if _valid_uid(uid) else None
+            if account is None or not account.enabled:
+                raise DomainError("not_found", 404)
+            return _employee(tx, account)
+
+        return self.store.run_read(read)

@@ -1,0 +1,76 @@
+openapi: 3.0.0
+info:
+  title: Worklog Yandex Test API
+  version: 1.0.0
+
+# At deployment, substitute these two placeholders with the new private test function ID
+# and the dedicated gateway service account ID. Grant that identity functions.functionInvoker
+# on this function only. The function runs as a separate identity scoped to the test YDB.
+paths:
+  /auth/register:
+    post: &http_operation
+      x-yc-apigateway-integration:
+        type: cloud_functions
+        function_id: WORKLOG_FUNCTION_ID
+        service_account_id: WORKLOG_GATEWAY_INVOKER_SA_ID
+        payload_format_version: "2.0"
+      responses:
+        '200':
+          description: Worklog JSON response
+        '204':
+          description: CORS preflight accepted
+        default:
+          description: Worklog JSON error
+    options: *http_operation
+  /auth/login:
+    post: *http_operation
+    options: *http_operation
+  /auth/renew:
+    post: *http_operation
+    options: *http_operation
+  /auth/logout:
+    post: *http_operation
+    options: *http_operation
+  /auth/reset:
+    post: *http_operation
+    options: *http_operation
+  /me/worklog:
+    get: *http_operation
+    put: *http_operation
+    options: *http_operation
+  /admin/employees:
+    get:
+      <<: *http_operation
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+    options: *http_operation
+  /admin/employees/{uid}:
+    parameters: &uid_parameter
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+    get: *http_operation
+    options: *http_operation
+  /admin/invites:
+    get: *http_operation
+    post: *http_operation
+    options: *http_operation
+  /admin/invites/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+    delete: *http_operation
+    options: *http_operation
+  /admin/users/{uid}/reset:
+    parameters: *uid_parameter
+    post: *http_operation
+    options: *http_operation
