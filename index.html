@@ -186,15 +186,23 @@ const {userScope,canWrite,employeeRows,validateWorklog,validDate,validNumber,val
 let activeUser=null, scope=null, isAdmin=null, authReady=true;
 let accountError='', authMode='login', adminData=null, session=0;
 let sync=null, syncState=null, syncTimer=null, syncDelay=2000;
+let adminEpoch=0, connectivityEpoch=0, disconnected=false;
 let invites=[], inviteBusy=false, inviteError='', adminSecret=null, cancelConfirm=null;
 let DB=normalizeRemote();
 const nativeSession=(()=>{
   const capacitor=window.Capacitor;
   if(!capacitor?.isNativePlatform?.() || !capacitor.isPluginAvailable('RememberedSession')) return null;
   const plugin=capacitor.Plugins.RememberedSession;
-  return {get:async()=>(await plugin.get()).token,set:token=>plugin.set({token}),clear:()=>plugin.clear()};
+  return {
+    get:async()=>{
+      const {token,grant}=await plugin.get();
+      return grant===undefined ? token : {token,grant};
+    },
+    set:value=>plugin.set(typeof value==='string' ? {token:value} : value),
+    clear:()=>plugin.clear()
+  };
 })();
-let restoreError='', restoring=false, forgetting=false, forgetFailed=false;
+let restoreError='', resumeLocked=false, restoring=false, forgetting=false, forgetFailed=false;
 const api=WorklogApi.create({baseUrl:WORKLOG_API_BASE_URL,fetch:(...args)=>fetch(...args),rememberStore:nativeSession,onSession:user=>{
   if(!user){
     clearAccount();
@@ -202,7 +210,7 @@ const api=WorklogApi.create({baseUrl:WORKLOG_API_BASE_URL,fetch:(...args)=>fetch
     render();
   } else if(user.uid===scope?.uid){
     activeUser=user;
-    if(user.role!=='admin') closeAdmin();
+    if(user.role!=='admin' || disconnected || api.isOffline() || navigator.onLine===false) closeAdmin();
     else {isAdmin=true; updateEmployeeTab();}
   }
 }});
@@ -212,7 +220,7 @@ function normalizeRemote(remote){
   return {version:1,settings,days:remote?.days||{}};
 }
 function saveDB(data=DB){
-  if(!canWrite(activeUser,isAdmin) || !sync) return false;
+  if(!personalValid() || !canWrite(activeUser,isAdmin) || !sync) return false;
   if(!sync.edit(data)){
     toast('Не удалось сохранить данные. Проверьте значения и свободное место.');
     return false;
@@ -221,13 +229,13 @@ function saveDB(data=DB){
   return true;
 }
 function clearAccount(){
-  session++;
+  session++; adminEpoch++; disconnected=false;
   clearTimeout(syncTimer);
   sync?.close();
   sync=null; syncState=null; syncDelay=2000;
   activeUser=null; scope=null; isAdmin=null; adminData=null;
   authMode='login'; accountError=''; authReady=true;
-  restoreError=''; restoring=false; forgetting=false; forgetFailed=false;
+  resumeLocked=false; restoreError=''; restoring=false; forgetting=false; forgetFailed=false;
   employeeView=newEmployeeView(); employeesLoading=false; employeesError='';
   invites=[]; inviteBusy=false; inviteError=''; adminSecret=null;
   cancelConfirm?.();
@@ -240,10 +248,11 @@ async function bindAccount(user){
   scope=userScope(user);
   if(!scope){render();return;}
   activeUser=user;
-  isAdmin=user.role==='admin';
+  disconnected=api.isOffline() || navigator.onLine===false;
+  isAdmin=!disconnected && user.role==='admin';
   const current=session;
   sync=WorklogSync.create({uid:scope.uid,storage:localStorage,api,canSend:syncAvailable,
-    canRefresh:()=>!state.editDate && !state.settingsDirty,onState:next=>{
+    canRefresh:canRefreshPersonal,onState:next=>{
     if(current!==session) return;
     const revisionChanged=next.revision!==syncState?.revision;
     syncState=next;
@@ -254,20 +263,90 @@ async function bindAccount(user){
   syncState=sync.load();
   DB=normalizeRemote(syncState.data);
   render();
-  await runSync(current);
+  if(api.isOffline()) scheduleSync(navigator.onLine===false?60000:syncDelay);
+  else if(disconnected) await disconnect();
+  else await runSync(current);
 }
-function syncAvailable(){return !document.hidden && navigator.onLine!==false;}
+function personalValid(){
+  if(!activeUser || !api.isOffline() || api.offlineValid()) return true;
+  void api.checkpointOffline();
+  clearAccount();render();
+  return false;
+}
+function canRefreshPersonal(){return !state.editDate && !state.settingsDirty;}
+function syncAvailable(){return !document.hidden && navigator.onLine!==false && !disconnected && !api.isOffline();}
+function adminAvailable(){return authReady && isAdmin===true && !disconnected && !api.isOffline() && navigator.onLine!==false;}
+async function disconnect(){
+  clearTimeout(syncTimer);
+  if(resumeLocked){
+    connectivityEpoch++;
+    await api.enterOffline();
+    return;
+  }
+  if(!activeUser) return;
+  disconnected=true;connectivityEpoch++;
+  closeAdmin();
+  const current=session, epoch=connectivityEpoch;
+  const transition=api.enterOffline();
+  if(api.requiresOnlineIdentity()){
+    clearAccount();
+    resumeLocked=true;
+    authReady=false;
+    restoreError='Для доступа к данным подключитесь к интернету.';
+    render();
+    scheduleSync(syncDelay);
+    await transition;
+    return;
+  }
+  await transition;
+  if(current!==session || epoch!==connectivityEpoch) return;
+  renderSyncStatus();
+  scheduleSync(navigator.onLine===false?60000:syncDelay);
+}
 function scheduleSync(delay){
   clearTimeout(syncTimer);
-  if(!sync || !syncAvailable()) return;
+  if(document.hidden) return;
+  if(resumeLocked){
+    if(navigator.onLine!==false && !restoring) syncTimer=setTimeout(restoreRemembered,delay);
+    return;
+  }
+  if(!sync) return;
   const current=session;
   syncTimer=setTimeout(()=>runSync(current),delay);
 }
 async function runSync(current){
-  if(current!==session || !sync || !syncAvailable()) return;
+  if(current!==session || !sync || !personalValid() || document.hidden) return;
+  const epoch=connectivityEpoch;
+  if(api.isOffline() && !await api.checkpointOffline()) return;
+  if(current!==session || epoch!==connectivityEpoch) return;
+  if(navigator.onLine===false){scheduleSync(60000);return;}
+  if(disconnected || api.isOffline()){
+    let user;
+    try {user=await api.reconnect();}
+    catch(e){
+      if(current===session && epoch===connectivityEpoch){
+        renderSyncStatus();scheduleSync(syncDelay);syncDelay=Math.min(syncDelay*2,60000);
+      }
+      return;
+    }
+    if(current!==session) return;
+    if(epoch!==connectivityEpoch || navigator.onLine===false){
+      if(disconnected && !api.isOffline()) await disconnect();
+      return;
+    }
+    if(!user || user.uid!==scope.uid){clearAccount();render();return;}
+    activeUser=user;disconnected=false;isAdmin=user.role==='admin';updateEmployeeTab();
+  }
+  if(!syncState.pending && (!syncState.conflict || syncState.conflict.resolved) && !canRefreshPersonal()){
+    renderSyncStatus();scheduleSync(60000);return;
+  }
   await sync.refresh();
-  if(current!==session) return;
-  if(syncState?.pending && ['network','timeout','rate_limited','internal_error','service_unavailable','request_failed'].includes(syncState.error)){
+  if(current!==session || epoch!==connectivityEpoch) return;
+  if(['network','timeout'].includes(syncState?.error)){
+    await disconnect();return;
+  }
+  renderSyncStatus();
+  if(syncState?.pending && ['rate_limited','internal_error','service_unavailable','request_failed'].includes(syncState.error)){
     scheduleSync(syncDelay);
     syncDelay=Math.min(syncDelay*2,60000);
   } else {
@@ -282,36 +361,49 @@ function renderSyncStatus(){
   const {conflict,error,pending,revision}=syncState;
   const unresolved=conflict && !conflict.resolved;
   const blocked=pending?.blocked;
+  const offline=disconnected || api.isOffline() || navigator.onLine===false;
   const messages={storage:'Не удалось сохранить данные на устройстве.',invalid_worklog:'Данные не прошли проверку.',
     unconfigured:'Сервер приложения не настроен.'};
   document.getElementById('syncStatus').textContent=unresolved
     ? 'Есть изменения на другом устройстве. Ваш черновик сохранён.'
     : blocked==='worklog_too_large'?'Данные превышают лимит сервера. Черновик сохранён на устройстве.'
     : blocked?'Сервер отклонил данные. Черновик сохранён на устройстве.'
-    : messages[error] || (error || navigator.onLine===false
+    : messages[error] || (offline?'Без интернета. Изменения сохраняются на устройстве.':error
       ? (pending?'Нет синхронизации. Изменения сохранены на устройстве.':'Синхронизация недоступна.')
       : pending?'Изменения ожидают отправки.':revision===null?'Ожидание первой синхронизации…':'Данные синхронизированы.');
+  if(offline && (unresolved || blocked)) document.getElementById('syncStatus').textContent+=' Без интернета.';
+  document.getElementById('syncKeepServer').disabled=offline;
+  document.getElementById('syncRetryLocal').disabled=offline;
   document.getElementById('syncKeepServer').hidden=!unresolved;
   document.getElementById('syncRetryLocal').hidden=!unresolved;
   document.getElementById('syncExportDraft').hidden=!conflict && !blocked;
   document.getElementById('syncRefresh').hidden=!error || unresolved || !!blocked;
 }
 async function recoverSync(choice){
+  if(!sync || !syncAvailable()) return;
   const current=session;
   const retry=choice==='retry-local';
   const approved=await confirmModal('Конфликт синхронизации',retry
     ? 'Отправить ваш черновик и заменить им текущую версию на сервере?'
     : 'Загрузить текущую версию сервера? Ваш черновик останется доступен для экспорта.',retry?'Отправить черновик':'Загрузить с сервера');
-  if(!approved || current!==session || !sync) return;
+  if(!approved || current!==session || !sync || !syncAvailable()) return;
+  const epoch=connectivityEpoch;
   await sync.resolveConflict(choice);
-  if(current!==session) return;
+  if(current!==session || epoch!==connectivityEpoch) return;
+  if(['network','timeout'].includes(syncState.error)){
+    await disconnect();return;
+  }
   if(syncState.error) toast('Не удалось обновить данные. Черновик сохранён.');
   else if(!syncState.conflict || syncState.conflict.resolved){state.editDate=null;state.settingsDirty=false;render();}
   scheduleSync(60000);
 }
 window.addEventListener('online',()=>{renderSyncStatus();scheduleSync(0);});
-window.addEventListener('offline',()=>{clearTimeout(syncTimer);renderSyncStatus();});
-document.addEventListener('visibilitychange',()=>{
+window.addEventListener('offline',disconnect);
+document.addEventListener('visibilitychange',async()=>{
+  const current=session;
+  if(!personalValid()) return;
+  if(api.isOffline() && !await api.checkpointOffline()) return;
+  if(current!==session) return;
   if(document.hidden) clearTimeout(syncTimer);
   else scheduleSync(0);
 });
@@ -472,7 +564,7 @@ function confirmModal(title, text, okLabel='ОК'){
   });
 }
 function setTab(t){
-  if(t==='employees' && (!authReady || isAdmin!==true || accountError)) return;
+  if(t==='employees' && (!adminAvailable() || accountError)) return;
   if(t!=='employees'){
     adminSecret=null;
     if(state.tab==='employees') employeeView={...employeeView};
@@ -547,19 +639,28 @@ function renderLogin(app){
   };
 }
 async function restoreRemembered(){
-  if(!nativeSession || restoring || forgetting || forgetFailed) return;
+  if(!nativeSession || restoring || forgetting || forgetFailed || (resumeLocked && navigator.onLine===false)) return;
   const current=session;
   authReady=false; restoring=true; restoreError=''; render();
   try {
-    const user=await api.restore();
+    const epoch=connectivityEpoch;
+    const user=resumeLocked?await api.reconnect():await api.restore();
     if(current!==session) return;
+    if(resumeLocked && (epoch!==connectivityEpoch || navigator.onLine===false)) return;
     if(user) await bindAccount(user);
-    else {authReady=true; render();}
+    else {resumeLocked=false;authReady=true; render();}
   } catch(e){
     if(current!==session) return;
     restoreError=e.code==='secure_storage'?'Защищённый сеанс недоступен.': 'Не удалось проверить сохранённый вход. Проверьте подключение к интернету.';
   } finally {
-    if(current===session){restoring=false;render();}
+    if(current===session){
+      restoring=false;
+      render();
+      if(resumeLocked){
+        scheduleSync(syncDelay);
+        syncDelay=Math.min(syncDelay*2,60000);
+      }
+    }
   }
 }
 async function forgetRemembered(){
@@ -572,54 +673,58 @@ async function forgetRemembered(){
   finally {if(current===session){forgetting=false;render();}}
 }
 function renderRestore(app){
-  if(restoring || forgetting){app.textContent=forgetting?'Выход…':'Проверка сохранённого входа…';return;}
+  if((restoring && !resumeLocked) || forgetting){app.textContent=forgetting?'Выход…':'Проверка сохранённого входа…';return;}
   app.innerHTML=`<div class="card"><p id="restoreMessage" role="status"></p><div style="display:grid;gap:10px">${forgetFailed?'':'<button class="btn primary" id="restoreRetry">Повторить</button>'}<button class="btn" id="restoreForget">${forgetFailed?'Повторить выход':'Выйти и войти заново'}</button></div></div>`;
-  document.getElementById('restoreMessage').textContent=restoreError;
+  document.getElementById('restoreMessage').textContent=restoring?'Проверка сохранённого входа…':restoreError;
+  if(resumeLocked) document.getElementById('restoreRetry').disabled=restoring || navigator.onLine===false;
   if(!forgetFailed) document.getElementById('restoreRetry').onclick=()=>restoreRemembered();
   document.getElementById('restoreForget').onclick=()=>forgetRemembered();
 }
 function updateEmployeeTab(){
-  document.getElementById('navEmployees').style.display=authReady && isAdmin===true?'flex':'none';
+  document.getElementById('navEmployees').style.display=adminAvailable()?'flex':'none';
 }
 function closeAdmin(){
+  adminEpoch++; employeesLoading=false; employeesError=''; inviteBusy=false;
   adminData=null; employeeView=newEmployeeView(); isAdmin=false;
   invites=[]; adminSecret=null; inviteError='';
-  if(state.tab==='employees'){cancelConfirm?.();state.tab='home';render();toast('Доступ к сотрудникам отозван');}
+  if(state.tab==='employees'){cancelConfirm?.();state.tab='home';render();if(!disconnected) toast('Доступ к сотрудникам отозван');}
   else updateEmployeeTab();
 }
 async function refreshEmployees(){
-  if(!authReady || isAdmin!==true || !scope || employeesLoading) return;
-  const current=session;
+  if(!adminAvailable() || !scope || employeesLoading) return;
+  const current=adminEpoch;
   employeesLoading=true; employeesError='';
   if(state.tab==='employees') render();
   try{
     const {users}=await api.employees();
-    if(current!==session || isAdmin!==true) return;
+    if(current!==adminEpoch || !adminAvailable()) return;
     adminData=users;
     if(employeeView.uid && !Object.prototype.hasOwnProperty.call(adminData,employeeView.uid)) setEmployeeView();
   } catch(e){
-    if(current!==session) return;
-    if(e.status===403) closeAdmin();
+    if(current!==adminEpoch) return;
+    if(['network','timeout'].includes(e.code)) await disconnect();
+    else if(e.status===403) closeAdmin();
     else employeesError='Не удалось загрузить сотрудников. Повторите попытку.';
   } finally {
-    if(current===session){
+    if(current===adminEpoch){
       employeesLoading=false;
       if(state.tab==='employees') render();
     }
   }
 }
 async function inviteAction(action){
-  if(isAdmin!==true || inviteBusy) return;
-  const current=session;
+  if(!adminAvailable() || inviteBusy) return;
+  const current=adminEpoch;
   inviteBusy=true; inviteError='';
   if(state.tab==='employees') render();
-  try {await action(()=>current===session && isAdmin===true && state.tab==='employees');}
+  try {await action(()=>current===adminEpoch && adminAvailable() && state.tab==='employees');}
   catch(e){
-    if(current!==session) return;
-    if(e.status===403) closeAdmin();
+    if(current!==adminEpoch) return;
+    if(['network','timeout'].includes(e.code)) await disconnect();
+    else if(e.status===403) closeAdmin();
     else inviteError='Не удалось выполнить действие с кодом. Повторите попытку.';
   } finally {
-    if(current===session){
+    if(current===adminEpoch){
       inviteBusy=false;
       if(state.tab==='employees') render();
     }
@@ -636,7 +741,7 @@ function setEmployeeView(uid=null){
   employeeView={...newEmployeeView(),uid};
 }
 function selectEmployee(uid){
-  if(isAdmin!==true || !authReady || !adminData || uid===scope?.uid || !Object.prototype.hasOwnProperty.call(adminData,uid)) return;
+  if(!adminAvailable() || !adminData || uid===scope?.uid || !Object.prototype.hasOwnProperty.call(adminData,uid)) return;
   setEmployeeView(uid);
   render();
 }
@@ -655,6 +760,7 @@ function employeeWorklog(row){
   return data;
 }
 function renderInvites(app){
+  if(!adminAvailable()) return;
   const card=document.createElement('div'); card.className='card'; app.appendChild(card);
   const title=document.createElement('h2'); title.textContent='Приглашения'; card.appendChild(title);
   const create=document.createElement('button'); create.className='btn ghost';
@@ -698,9 +804,10 @@ function formatExpiry(value){
   return Number.isFinite(date.valueOf())?date.toLocaleString('ru-RU'):'';
 }
 function renderAdminSecret(app,row){
+  if(!adminAvailable()) return;
   const secret=adminSecret;
   if(!secret || (secret.kind==='reset' && secret.recipientUid!==row?.uid)) return;
-  const visible=()=>adminSecret===secret && state.tab==='employees' &&
+  const visible=()=>adminAvailable() && adminSecret===secret && state.tab==='employees' &&
     (secret.kind!=='reset' || employeeView.uid===secret.recipientUid);
   const card=document.createElement('div'); card.className='card'; app.appendChild(card);
   const title=document.createElement('h2');
@@ -726,7 +833,7 @@ function renderAdminSecret(app,row){
 }
 async function issueEmployeeReset(row){
   const view=employeeView;
-  const selected=()=>state.tab==='employees' && employeeView===view && view.uid===row.uid;
+  const selected=()=>adminAvailable() && state.tab==='employees' && employeeView===view && view.uid===row.uid;
   if(!selected()) return;
   const approved=await confirmModal('Выдать код восстановления?',
     'Подтвердите личность владельца '+row.email+' перед выдачей кода.','Личность подтверждена');
@@ -738,6 +845,7 @@ async function issueEmployeeReset(row){
 }
 function renderAdmin(app){
   app.replaceChildren();
+  if(!adminAvailable()) return;
   const card=document.createElement('div'); card.className='card'; app.appendChild(card);
   const title=document.createElement('h2'); title.textContent='Сотрудники · только просмотр'; card.appendChild(title);
   const rows=employeeRows(adminData).filter(row=>row.uid!==scope.uid);
@@ -813,6 +921,7 @@ document.getElementById('syncExportDraft').onclick=event=>{
 };
 document.getElementById('syncRefresh').onclick=()=>scheduleSync(0);
 function render(){
+  if(!personalValid()) return;
   const app = document.getElementById('app');
   const hTitle = document.getElementById('hTitle');
   const hSub = document.getElementById('hSub');
@@ -1268,6 +1377,7 @@ function bindSettings(){
   };
 }
 async function exportBackup(worklog,button,prefix='worklog_backup_'){
+  if(!personalValid() || !activeUser) return;
   const current=session;
   if(button.disabled) return;
   button.disabled = true;

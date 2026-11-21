@@ -38,8 +38,16 @@ class AuthTest(unittest.TestCase):
         self.register_employee()
         started = self.now
         auth = self.service.login("employee@example.test", PASSWORD, "192.0.2.1", remember=True)
-        self.now = started + 8 * 86400
+        self.assertEqual(
+            (auth.get("refreshExpiresAt"), auth.get("serverTime")),
+            ("2027-02-14T08:00:00Z", "2027-01-15T08:00:00Z"),
+        )
+        self.now = started + 86400
         auth = self.service.renew(auth["refreshToken"])
+        self.assertEqual(
+            (auth.get("refreshExpiresAt"), auth.get("serverTime")),
+            ("2027-02-14T08:00:00Z", "2027-01-16T08:00:00Z"),
+        )
         self.now = started + 30 * 86400 - 1
         auth = self.service.renew(auth["refreshToken"])
         self.assertEqual(self.service.authenticate(auth["accessToken"]).role, "employee")
@@ -53,6 +61,10 @@ class AuthTest(unittest.TestCase):
         unchecked = self.service.login("employee@example.test", PASSWORD, "192.0.2.1", remember=False)
         self.now += 7 * 86400
         for auth in (legacy, unchecked):
+            self.assertEqual(
+                (auth.get("refreshExpiresAt"), auth.get("serverTime")),
+                ("2027-01-22T08:00:00Z", "2027-01-15T08:00:00Z"),
+            )
             self.assert_error("invalid_session", 401, self.service.renew, auth["refreshToken"])
 
     def test_remembered_session_revoked_on_logout(self):

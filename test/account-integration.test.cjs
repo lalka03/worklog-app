@@ -8,10 +8,18 @@ const alpha='00000000-0000-4000-8000-000000000001';
 const beta='00000000-0000-4000-8000-000000000002';
 const admin='00000000-0000-4000-8000-000000000003';
 const html=fs.readFileSync('index.html','utf8');
-const WorklogApi={create:options=>require('../api.js').create({...options,baseUrl:'https://worklog.example.test'})};
+const start=Date.parse('2026-11-20T12:00:00Z');
+const timing={serverTime:'2026-11-20T12:00:00Z',refreshExpiresAt:'2026-12-20T12:00:00Z'};
+function protectedRecord(uid,name){
+  return {token:uid,grant:{version:1,user:{uid,email:name+'@example.test',role:name==='admin'?'admin':'employee'},
+    ...timing,verifiedLocalMs:start,checkedLocalMs:start}};
+}
 
-function appHarness({remembered=null,native=false,renewOffline=false,clearFails=false}={}){
-  const calls=[], records=new Map(), cached=new Map(), readErrors=new Map(), resetResponses=new Map(), clipboard=[];
+function appHarness({remembered=null,native=false,renewOffline=false,clearFails=false,online=true,cached=new Map(),time=start}={}){
+  const calls=[], records=new Map(), readErrors=new Map(), resetResponses=new Map(), clipboard=[];
+  const controls={time,renewOffline}, events=new Map(), timers=new Map(), deferred=new Map();
+  let timerId=0;
+  const WorklogApi={create:options=>require('../api.js').create({...options,now:()=>controls.time,baseUrl:'https://worklog.example.test'})};
   const elements=new Map();
   function makeElement(){
     const handlers=new Map();
@@ -32,20 +40,23 @@ function appHarness({remembered=null,native=false,renewOffline=false,clearFails=
     const body=options.body && JSON.parse(options.body);
     calls.push({path,uid,method:options.method,body});
     const respond=(data,status=200)=>Response.json(data,{status});
+    if(deferred.has(path)) return await deferred.get(path);
+    if(path!=='/auth/renew' && controls.networkDown) throw new TypeError('offline');
     if(path==='/auth/login' || path==='/auth/register'){
       const found=byEmail(body.email);
       if(path==='/auth/login' && !found) return respond({error:'invalid_credentials'},401);
       if(path==='/auth/register' && body.invite!=='valid') return respond({error:'invalid_invite'},422);
       const id=found?.[0]??beta;
-      return respond({user:{uid:id,email:body.email,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id,expiresAt:'2026-11-20T12:00:00Z'});
+      return respond({user:{uid:id,email:body.email,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id,...timing});
     }
     if(path==='/auth/logout') return respond({});
     if(path==='/auth/renew'){
-      if(renewOffline) throw new TypeError('offline');
+      if(controls.reject) return respond({error:"invalid_session"},401);
+      if(controls.renewOffline) throw new TypeError('offline');
       const id=body.refreshToken;
       const name=users.get(id);
       if(!name) return respond({error:'invalid_session'},401);
-      return respond({user:{uid:id,email:`${name}@example.test`,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id});
+      return respond({user:{uid:id,email:`${name}@example.test`,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id,...timing});
     }
     if(path==='/auth/reset') return respond({});
     if(readErrors.has(path)) return respond({error:'forbidden'},403);
@@ -63,17 +74,20 @@ function appHarness({remembered=null,native=false,renewOffline=false,clearFails=
     assert.fail(`Unexpected path: ${path}`);
   };
   const ctx=vm.createContext({WorklogAccounts:accounts,WorklogApi,WorklogSync:require('../sync.js'),
-    document:{getElementById:element,querySelectorAll:()=>[],createElement:makeElement,addEventListener(){}},
-    window:{scrollTo(){},addEventListener(){},...(native?{Capacitor:{isNativePlatform:()=>true,isPluginAvailable:name=>name==='RememberedSession',Plugins:{RememberedSession:{
-      get:async()=>({token:remembered}),set:async({token})=>{remembered=token;},clear:async()=>{if(clearFails) throw new Error('storage unavailable');remembered=null;}
-    }}}}:{})},fetch,URL,TextEncoder,navigator:{clipboard:{writeText:async value=>clipboard.push(value)}},
+    document:{getElementById:element,querySelectorAll:()=>[],createElement:makeElement,addEventListener:(name,fn)=>events.set(name,fn)},
+    window:{scrollTo(){},addEventListener:(name,fn)=>events.set(name,fn),...(native?{Capacitor:{isNativePlatform:()=>true,isPluginAvailable:name=>name==='RememberedSession',Plugins:{RememberedSession:{
+      get:async()=>typeof remembered==="object" && remembered?remembered:{token:remembered},set:async record=>{remembered=record;},clear:async()=>{if(clearFails) throw new Error('storage unavailable');remembered=null;}
+    }}}}:{})},fetch,URL,TextEncoder,navigator:{onLine:online,clipboard:{writeText:async value=>clipboard.push(value)}},
     localStorage:{getItem:k=>cached.get(k)||null,setItem:(k,v)=>cached.set(k,v),removeItem:k=>cached.delete(k)},
-    setTimeout:()=>1,clearTimeout:()=>{},console});
+    setTimeout:fn=>{timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id),console});
   const source=html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
   vm.runInContext(source.replace(/\(function init\(\)\{[\s\S]*?\}\)\(\);\s*$/, '')+'\nconst originalRender=render; render=()=>{}; toast=()=>{};',ctx);
   const run=code=>vm.runInContext(code,ctx);
-  return {calls,records,cached,readErrors,resetResponses,clipboard,ctx,run,element,
-    login:name=>run(`(async()=>bindAccount(await api.login('${name}@example.test','sample-password')))()`),
+  return {controls,deferred,record:()=>remembered,fire:async name=>{
+    if(name==='online' || name==='offline') ctx.navigator.onLine=name==='online';
+    await events.get(name)?.();
+  },tick:async()=>{const timer=[...timers].at(-1);if(timer){timers.delete(timer[0]);await timer[1]();}},calls,records,cached,readErrors,resetResponses,clipboard,ctx,run,element,
+    login:(name,keep=false)=>run(`(async()=>bindAccount(await api.login('${name}@example.test','sample-password',${keep})))()`),
     logout:()=>run("document.getElementById('btnLogout').onclick()")};
 }
 
@@ -357,4 +371,277 @@ test('a reset response is discarded when the operator changes recipient while it
   await issue;
   h.run('originalRender()');
   assert.ok(!descendants(h.element('app')).some(item=>item.value===resetCode.code));
+});
+
+async function offlineApp(name='alpha'){
+  const uid=name==='admin'?admin:alpha;
+  const first=appHarness({native:true});
+  await first.login(name,true);
+  first.run("DB.days['2026-11-19']={date:'2026-11-19'};saveDB()");
+  await first.run('sync.flush()');
+  first.cached.set('worklog.yandex.test.v1:'+beta,'unrelated account');
+  const h=appHarness({native:true,remembered:first.record(),cached:first.cached,renewOffline:true,online:false});
+  h.records.set(uid,first.records.get(uid));
+  await h.run('restoreRemembered()');
+  return h;
+}
+
+test('offline cold start edits its own cache and verifies before uploading the draft',async()=>{
+  const h=await offlineApp('admin');
+  assert.equal(h.run('activeUser.uid'),admin);
+  assert.equal(h.run('isAdmin'),false);
+  assert.deepEqual([...h.run('Object.keys(DB.days)')],['2026-11-19']);
+  h.run("setTab('employees');renderAdmin(document.getElementById('app'));refreshEmployees();refreshInvites();renderSyncStatus()");
+  assert.equal(h.run('state.tab'),'home');
+  assert.equal(h.element('app').children.length,0);
+  assert.equal(h.element('syncStatus').textContent,'Без интернета. Изменения сохраняются на устройстве.');
+  assert.equal(h.run("DB.days['2026-11-20']={date:'2026-11-20'};saveDB()"),true);
+  await h.tick();
+  assert.deepEqual(h.calls.map(x=>x.path),['/auth/renew']);
+  h.controls.renewOffline=false;
+  await h.fire('online');await h.tick();
+  assert.deepEqual(h.calls.slice(1).map(x=>[x.path,x.method]),[['/auth/renew','POST'],['/me/worklog','PUT']]);
+  assert.equal(h.calls.at(-1).body.expectedRevision,1);
+  assert.ok(h.records.get(admin).data.days['2026-11-20']);
+  assert.equal(h.run('isAdmin'),true);
+  assert.equal(h.element('syncStatus').textContent,'Данные синхронизированы.');
+});
+
+test('reconnect conflict keeps the offline draft',async()=>{
+  const h=await offlineApp();
+  h.run("DB.days['2026-11-20']={date:'2026-11-20'};saveDB()");
+  h.records.get(alpha).revision=2;h.controls.renewOffline=false;
+  await h.fire('online');await h.tick();
+  assert.ok(h.run("syncState.conflict?.local.days['2026-11-20']"));
+  assert.equal(h.records.get(alpha).data.days['2026-11-20'],undefined);
+});
+
+for(const trigger of ['render','save','foreground','timer','rollback','revocation']){
+  test('offline grant locks on '+trigger+' and retains only a UID-scoped draft',async()=>{
+    const h=await offlineApp();
+    h.run("DB.days['2026-11-20']={date:'2026-11-20'};saveDB()");
+    if(trigger==='revocation'){
+      h.controls.renewOffline=false;h.controls.reject=true;await h.fire('online');await h.tick();
+    }else{
+      h.controls.time=trigger==='rollback'?start-1:Date.parse(timing.refreshExpiresAt);
+      if(trigger==='save') assert.equal(h.run('saveDB()'),false);
+      else if(trigger==='render') h.run('originalRender()');
+      else if(trigger==='timer') await h.tick();
+      else await h.fire('visibilitychange');
+    }
+    assert.equal(h.run('activeUser'),null);
+    assert.equal(h.run('Object.keys(DB.days).length'),0);
+    assert.ok(JSON.parse(h.cached.get('worklog.yandex.test.v1:'+alpha)).pending.data.days['2026-11-20']);
+  });
+}
+
+test('disconnect clears admin data and ignores old employee replies even after revalidation',async()=>{
+  const h=appHarness();await h.login('admin');
+  h.records.set('users',{[alpha]:{profile:{email:'alpha@example.test'}}});
+  await h.run('refreshEmployees()');
+  let finish;
+  h.deferred.set('/admin/employees',new Promise(resolve=>{finish=resolve;}));
+  const pending=h.run('refreshEmployees()');
+  h.run("state.tab='employees'");
+  await h.fire('offline');
+  assert.equal(h.run('adminData'),null);
+  assert.equal(h.run('state.tab'),'home');
+  assert.equal(h.run('saveDB()'),true);
+  await h.fire('online');await h.tick();
+  finish(Response.json({users:{[beta]:{profile:{email:'beta@example.test'}}}}));
+  await pending;
+  assert.equal(h.run('adminData'),null);
+});
+
+test('backend network failure enters personal-only mode even when the device reports online',async()=>{
+  const h=appHarness({native:true});await h.login('admin',true);
+  h.controls.networkDown=true;h.controls.renewOffline=true;
+  await h.run('runSync(session)');
+  assert.equal(h.run('api.isOffline()'),true);
+  assert.equal(h.run('isAdmin'),false);
+  assert.equal(h.run('saveDB()'),true);
+  await h.tick();
+  assert.equal(h.calls.at(-1).path,'/auth/renew');
+});
+
+test('revoked offline account cannot upload its pending shift through the next login',async()=>{
+  const h=await offlineApp();
+  h.run("DB.days['2026-11-20']={date:'2026-11-20'};saveDB()");
+  h.controls.reject=true;await h.fire('online');await h.tick();
+  await h.login('beta');
+  assert.equal(h.run('scope.uid'),beta);
+  assert.equal(h.run('Object.keys(DB.days).length'),0);
+  assert.ok(JSON.parse(h.cached.get('worklog.yandex.test.v1:'+alpha)).pending);
+  assert.equal(h.calls.filter(call=>call.method==='PUT').length,0);
+});
+
+test('offline logout with failed secure deletion keeps the account locked and preserves its queued draft',async()=>{
+  const h=appHarness({native:true,remembered:protectedRecord(alpha,'alpha'),renewOffline:true,online:false,clearFails:true});
+  await h.run('restoreRemembered()');
+  h.run("DB.days['2026-11-20']={date:'2026-11-20'};saveDB()");
+  await h.logout();h.run('originalRender()');
+  assert.equal(h.run('activeUser'),null);
+  assert.match(h.element('app').innerHTML,/Повторить выход/);
+  assert.ok(JSON.parse(h.cached.get('worklog.yandex.test.v1:'+alpha)).pending);
+  assert.equal(h.calls.length,1);
+});
+
+test('reconnect keeps the personal form open and all admin and sync calls blocked until verification finishes',async()=>{
+  const h=await offlineApp('admin');
+  h.run("state.editDate='2026-11-20';state.settingsDirty=true");
+  let done;
+  h.deferred.set('/auth/renew',new Promise(resolve=>{done=resolve;}));
+  await h.fire('online');const checking=h.tick();
+  await new Promise(resolve=>setImmediate(resolve));
+  await h.run('refreshEmployees()');await h.run('refreshInvites()');
+  assert.equal(h.run('isAdmin'),false);
+  assert.deepEqual(h.calls.map(x=>x.path),['/auth/renew','/auth/renew']);
+  done(Response.json({user:protectedRecord(admin,'admin').grant.user,accessToken:admin,refreshToken:admin,...timing}));
+  await checking;
+  assert.equal(h.run('state.editDate'),'2026-11-20');
+  assert.equal(h.run('state.settingsDirty'),true);
+  assert.equal(h.run('isAdmin'),true);
+});
+
+test('foreground checkpoint rejects rollback across a later cold launch',async()=>{
+  const h=await offlineApp();
+  h.controls.time=start+10000;
+  await h.fire('visibilitychange');
+  const next=appHarness({native:true,remembered:h.record(),cached:h.cached,online:false,renewOffline:true,time:start+5000});
+  await next.run('restoreRemembered()');
+  assert.equal(next.run('activeUser'),null);
+  assert.equal(next.calls.length,0);
+});
+
+test('admin service network failure clears previously loaded employee data immediately',async()=>{
+  const h=appHarness({native:true});await h.login('admin',true);
+  h.records.set('users',{[alpha]:{profile:{email:'alpha@example.test'}}});
+  await h.run('refreshEmployees()');h.controls.networkDown=true;
+  await h.run('refreshEmployees()');
+  assert.equal(h.run('adminData'),null);
+  assert.equal(h.run('isAdmin'),false);
+  assert.equal(h.run('api.isOffline()'),true);
+});
+
+test('a delayed invitation list cannot return after disconnect and same-account verification',async()=>{
+  const h=appHarness();await h.login('admin');
+  h.run("state.tab='employees'");
+  let done;
+  h.deferred.set('/admin/invites',new Promise(resolve=>{done=resolve;}));
+  const pending=h.run('refreshInvites()');
+  await h.fire('offline');await h.fire('online');await h.tick();
+  h.run("state.tab='employees'");
+  done(Response.json({invites:[{id:'old',state:'available'}]}));
+  await pending;
+  assert.equal(h.run('invites.length'),0);
+});
+
+test('a second disconnect during revalidation leaves the grant personal-only',async()=>{
+  const h=await offlineApp('admin');
+  let done;
+  h.deferred.set('/auth/renew',new Promise(resolve=>{done=resolve;}));
+  await h.fire('online');const checking=h.tick();
+  await new Promise(resolve=>setImmediate(resolve));
+  await h.fire('offline');
+  done(Response.json({user:protectedRecord(admin,'admin').grant.user,accessToken:admin,refreshToken:admin,...timing}));
+  await checking;
+  assert.equal(h.run('api.isOffline()'),true);
+  assert.equal(h.run('isAdmin'),false);
+  assert.equal(h.run('saveDB()'),true);
+  assert.equal(h.calls.filter(x=>x.path==='/me/worklog').length,0);
+});
+
+test('settings export locks an expired offline grant before accessing its data',async()=>{
+  const h=await offlineApp();h.run('bindSettings()');
+  h.controls.time=Date.parse(timing.refreshExpiresAt);
+  await h.element('expBtn').onclick({currentTarget:h.element('expBtn')});
+  assert.equal(h.run('activeUser'),null);
+});
+
+test('successful backend revalidation with an open form does not treat its old sync error as a fresh outage',async()=>{
+  const h=appHarness({native:true});await h.login('admin',true);
+  h.controls.networkDown=true;await h.run('runSync(session)');
+  h.run("state.editDate='2026-11-20'");
+  h.controls.networkDown=false;await h.tick();
+  assert.equal(h.run('api.isOffline()'),false);
+  assert.equal(h.run('isAdmin'),true);
+  assert.equal(h.run('state.editDate'),'2026-11-20');
+});
+
+test('conflict recovery network failure clears staff data and keeps the personal draft',async()=>{
+  const h=appHarness({native:true});await h.login('admin',true);
+  h.records.set('users',{[alpha]:{profile:{email:'alpha@example.test'}}});
+  await h.run('refreshEmployees()');
+  h.run("DB.days['2026-11-21']={date:'2026-11-21'};saveDB()");
+  h.records.set(admin,{data:h.run('normalizeRemote()'),revision:2});
+  await h.run('runSync(session)');
+  assert.equal(h.run('syncState.conflict.resolved'),false);
+  h.controls.networkDown=true;
+  const recovery=h.run("recoverSync('retry-local')");
+  h.element('mOk').click();await recovery;
+  assert.equal(h.run('adminData'),null);
+  assert.equal(h.run('api.isOffline()'),true);
+  assert.ok(h.run("syncState.conflict.local.days['2026-11-21']"));
+  h.run('renderSyncStatus()');
+  assert.match(h.element('syncStatus').textContent,/черновик.*Без интернета/i);
+  assert.equal(h.element('syncKeepServer').disabled,true);
+  assert.equal(h.element('syncRetryLocal').disabled,true);
+  await h.run("recoverSync('retry-local')");
+  assert.equal(h.run('cancelConfirm'),null);
+});
+
+test('staff access revoked during a personal refresh keeps subsequent personal refreshes scheduled',async()=>{
+  const h=appHarness();await h.login('admin');
+  let done;
+  h.deferred.set('/me/worklog',new Promise(resolve=>{done=resolve;}));
+  const refresh=h.tick();await new Promise(resolve=>setImmediate(resolve));
+  h.readErrors.set('/admin/employees',true);await h.run('refreshEmployees()');
+  done(Response.json({data:null,revision:0}));await refresh;
+  h.deferred.delete('/me/worklog');
+  const before=h.calls.length;await h.tick();
+  assert.deepEqual(h.calls.slice(before).map(call=>call.path),['/me/worklog']);
+  assert.equal(h.run('isAdmin'),false);
+});
+
+test('ordinary token renewal can demote an admin without stopping periodic personal refresh',async()=>{
+  const h=appHarness();await h.login('admin');
+  let rejectAccess;
+  h.deferred.set('/me/worklog',new Promise(resolve=>{rejectAccess=resolve;}));
+  h.deferred.set('/auth/renew',Promise.resolve(Response.json({
+    user:{uid:admin,email:'admin@example.test',role:'employee'},accessToken:admin,refreshToken:admin,...timing
+  })));
+  const refresh=h.tick();await new Promise(resolve=>setImmediate(resolve));
+  h.deferred.delete('/me/worklog');rejectAccess(Response.json({error:'invalid_session'},{status:401}));
+  await refresh;
+  assert.equal(h.run('isAdmin'),false);
+  const count=h.calls.length;await h.tick();
+  assert.deepEqual(h.calls.slice(count).map(call=>call.path),['/me/worklog']);
+});
+test('active token-only remembered account locks its draft until automatic online migration',async()=>{
+  const h=appHarness({native:true});
+  const {user}=protectedRecord(alpha,'alpha').grant;
+  h.deferred.set('/auth/login',Promise.resolve(Response.json({user,accessToken:alpha,refreshToken:alpha})));
+  await h.login('alpha',true);
+  h.run("DB.days['2026-11-20']={date:'2026-11-20'};saveDB()");
+  const key='worklog.yandex.test.v1:'+alpha,draft=h.cached.get(key);
+  assert.ok(JSON.parse(draft).pending);
+  await h.fire('offline');
+  h.run('originalRender()');
+  assert.equal(h.run('activeUser'),null);
+  assert.equal(h.run('saveDB()'),false);
+  assert.equal(h.run('sync'),null);
+  assert.equal(h.run('Object.keys(DB.days).length'),0);
+  assert.match(h.element('app').innerHTML,/restoreForget/);
+  assert.equal(h.record().token,alpha);
+  assert.equal(h.cached.get(key),draft);
+  const before=h.calls.length;
+  h.controls.renewOffline=true;
+  await h.fire('online');await h.tick();
+  assert.equal(h.run('activeUser'),null);
+  assert.equal(h.cached.get(key),draft);
+  h.controls.renewOffline=false;await h.tick();
+  assert.equal(h.calls[before].path,'/auth/renew');
+  assert.equal(h.record().grant.user.uid,alpha);
+  assert.equal(h.run('activeUser.uid'),alpha);
+  assert.ok(h.records.get(alpha).data.days['2026-11-20']);
 });

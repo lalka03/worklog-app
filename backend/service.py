@@ -71,6 +71,8 @@ class AuthResult(TypedDict):
     accessToken: str
     refreshToken: str
     expiresAt: str
+    refreshExpiresAt: str
+    serverTime: str
 
 
 class InviteResult(TypedDict):
@@ -250,11 +252,13 @@ def _account_generation_matches(account, generation):
     return account is not None and account.enabled and account.session_generation == generation
 
 
-def _auth_result(account, access, refresh, session):
+def _auth_result(account, access, refresh, session, now):
     return AuthResult(
         user=User(uid=account.uid, email=account.email, role=account.role),
         accessToken=access, refreshToken=refresh,
         expiresAt=utc_timestamp(session.access_expires_at),
+        refreshExpiresAt=utc_timestamp(session.refresh_expires_at),
+        serverTime=utc_timestamp(now),
     )
 
 
@@ -264,7 +268,7 @@ def _insert_session(tx, account, access, refresh, now, *, remember=False):
         now + ACCESS_SECONDS, now + (REMEMBER_SECONDS if remember else REFRESH_SECONDS),
     )
     tx.insert_session(session)
-    return _auth_result(account, access, refresh, session)
+    return _auth_result(account, access, refresh, session, now)
 
 
 def seed_owner_invite(
@@ -453,7 +457,7 @@ class Service:
                 access_expires_at=min(now + ACCESS_SECONDS, session.refresh_expires_at),
             )
             tx.rotate_session(session, updated)
-            return _auth_result(account, access, refresh, updated)
+            return _auth_result(account, access, refresh, updated, now)
 
         return self.store.run_write(renew)
 

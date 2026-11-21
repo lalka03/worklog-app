@@ -59,6 +59,10 @@ class HttpTest(unittest.TestCase):
         self.assert_reply(self.request("POST", "/auth/login", {**credentials, "remember": True, "role": "admin"}), 422)
         auth = self.assert_reply(self.request("POST", "/auth/login", {**credentials, "remember": True}), 200)
         self.assertEqual(auth["user"]["role"], "employee")
+        self.assertEqual(
+            (auth.get("refreshExpiresAt"), auth.get("serverTime")),
+            ("2023-12-14T22:13:20Z", "2023-11-14T22:13:20Z"),
+        )
         self.assert_reply(self.request("POST", "/auth/renew", {"refreshToken": auth["refreshToken"], "remember": True}), 422)
 
     def test_staff_cannot_list_or_read_other(self):
@@ -299,6 +303,19 @@ class HttpTest(unittest.TestCase):
             "email": registration["email"], "password": PASSWORD,
         }), 200)
         renewed = self.assert_reply(self.request("POST", "/auth/renew", {"refreshToken": login["refreshToken"]}), 200)
+        for auth in (registered, login, renewed):
+            self.assertEqual(
+                (auth.get("refreshExpiresAt"), auth.get("serverTime")),
+                ("2023-11-21T22:13:20Z", "2023-11-14T22:13:20Z"),
+            )
+            self.assertEqual(auth["expiresAt"], "2023-11-14T22:28:20Z")
+            self.assertEqual(auth["user"], {
+                "uid": registered["user"]["uid"], "email": registration["email"], "role": "employee",
+            })
+            self.assertIsInstance(auth["accessToken"], str)
+            self.assertTrue(auth["accessToken"])
+            self.assertIsInstance(auth["refreshToken"], str)
+            self.assertTrue(auth["refreshToken"])
         self.assert_reply(self.request("POST", "/auth/logout", token=renewed["accessToken"]), 200, {})
         self.assert_reply(self.request("GET", "/me/worklog", token=renewed["accessToken"]), 401,
                           {"error": "invalid_session"})

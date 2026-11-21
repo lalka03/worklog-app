@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '..');
 const assets = ['account.js', 'api.js', 'index.html', 'sync.js'];
@@ -107,8 +108,74 @@ test('native staging installs Android Keystore plugin and activity in the immuta
   assert.match(plugin,/AndroidKeyStore/);
   assert.match(plugin,/AES\/GCM\/NoPadding/);
   assert.match(plugin,/getNoBackupFilesDir\(\)/);
-  assert.match(plugin,/finishWrite\(output\);[\s\S]*Arrays\.equals\(.*readFully\(\)/);
+  // Inspect the staged Android source. The signed device run exercises the Keystore.
+  assert.match(plugin,/MAX_PLAINTEXT_BYTES = 4096/);
+  assert.match(plugin,/MAX_CIPHERTEXT_BYTES = IV_SIZE \+ TAG_BITS \/ 8 \+ MAX_PLAINTEXT_BYTES/);
+  assert.match(plugin,/if \(validToken\(plaintext\)\)[\s\S]*validRecord\(record\)/);
+  assert.match(plugin,/cipher\.doFinal\(plaintext\)/);
+  for (const field of ['version', 'user', 'uid', 'email', 'role', 'refreshExpiresAt', 'serverTime', 'verifiedLocalMs', 'checkedLocalMs']) {
+    assert.ok(plugin.includes('"' + field + '"'), field);
+  }
+  assert.match(plugin,/!validRecord\(record\)[\s\S]*erase\(\); empty\(call\)/);
+  assert.match(plugin,/!validRecord\(record\)[\s\S]*call\.reject/);
+  assert.match(plugin,/record\.length\(\) != 2[\s\S]*grant\.length\(\) != 6/);
+  assert.match(plugin,/user\.length\(\) != 3/);
+  assert.match(plugin,/expiresAt > serverTime && expiresAt - serverTime <= MAX_GRANT_MS/);
+  assert.match(plugin,/checked >= verified/);
+  assert.match(plugin,/new byte\[MAX_CIPHERTEXT_BYTES \+ 1\]/);
+  assert.match(plugin,/synchronized void clear\(PluginCall call\)[\s\S]*erase\(\)/);
+  assert.match(plugin,/finishWrite\(output\);[\s\S]*Arrays\.equals\(.*readCiphertext\(target\)/);
   assert.match(activity,/registerPlugin\(RememberedSessionPlugin.class\);[\s\S]*super.onCreate/);
   const workflow=fs.readFileSync(path.join(root,'.github/workflows/build-apk.yml'),'utf8');
   assert.match(workflow,/npx cap add android[\s\S]*node scripts\/stage-android-session.cjs[\s\S]*assembleRelease/);
 });
+
+test('staged bridge preserves legacy tokens and returns null when the native store is empty', async t => {
+  const token = 'legacy_refresh_credential_32';
+  const bridge = stagedBridge(t, { get: async () => ({ token }) });
+  assert.equal(await bridge.get(), token);
+  const empty = stagedBridge(t, { get: async () => ({ token: null }) });
+  assert.equal(await empty.get(), null);
+  let stored;
+  const writer = stagedBridge(t, { set: async value => { stored = value; } });
+  await writer.set(token);
+  assert.equal(JSON.stringify(stored), JSON.stringify({ token }));
+});
+
+test('staged bridge reads and writes the complete protected grant in one plugin call', async t => {
+  const record = {
+    token: 'rotated_refresh_credential_33',
+    grant: {
+      version: 1,
+      user: { uid: '00000000-0000-4000-8000-000000000001', email: 'worker@example.test', role: 'employee' },
+      refreshExpiresAt: '2026-12-01T00:00:00Z',
+      serverTime: '2026-11-21T00:00:00Z',
+      verifiedLocalMs: 1795219200000,
+      checkedLocalMs: 1795219200000,
+    },
+  };
+  const writes = [];
+  const bridge = stagedBridge(t, {
+    get: async () => record,
+    set: async value => { writes.push(value); },
+    clear: async () => { writes.length = 0; },
+  });
+  assert.equal(JSON.stringify(await bridge.get()), JSON.stringify(record));
+  await bridge.set(record);
+  assert.equal(JSON.stringify(writes), JSON.stringify([record]));
+  await bridge.clear();
+  assert.equal(writes.length, 0);
+});
+
+function stagedBridge(t, plugin) {
+  const directory = fixture(t);
+  const run = stage(directory, gateway);
+  assert.equal(run.status, 0, run.stderr);
+  const html = fs.readFileSync(path.join(directory, 'www', 'index.html'), 'utf8');
+  const bridge = html.slice(html.indexOf('const nativeSession='), html.indexOf("let restoreError="));
+  return vm.runInNewContext(bridge + '\nnativeSession', { window: { Capacitor: {
+    isNativePlatform: () => true,
+    isPluginAvailable: name => name === 'RememberedSession',
+    Plugins: { RememberedSession: plugin },
+  } } });
+}
