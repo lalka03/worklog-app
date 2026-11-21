@@ -70,6 +70,9 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
+      - name: Install Android protected session bridge
+        run: node scripts/stage-android-session.cjs
+
       - name: Configure signing
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}

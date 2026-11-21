@@ -26,6 +26,7 @@ from .store import (
 
 ACCESS_SECONDS = 15 * 60
 REFRESH_SECONDS = 7 * 24 * 60 * 60
+REMEMBER_SECONDS = 30 * 24 * 60 * 60
 INVITE_SECONDS = 7 * 24 * 60 * 60
 RESET_SECONDS = 60 * 60
 RATE_WINDOW = 15 * 60
@@ -257,10 +258,10 @@ def _auth_result(account, access, refresh, session):
     )
 
 
-def _insert_session(tx, account, access, refresh, now):
+def _insert_session(tx, account, access, refresh, now, *, remember=False):
     session = Session(
         _id(), account.uid, account.session_generation, security.digest(access), security.digest(refresh),
-        now + ACCESS_SECONDS, now + REFRESH_SECONDS,
+        now + ACCESS_SECONDS, now + (REMEMBER_SECONDS if remember else REFRESH_SECONDS),
     )
     tx.insert_session(session)
     return _auth_result(account, access, refresh, session)
@@ -399,7 +400,9 @@ class Service:
         # Credentials are checked after this transaction commits. Wrong passwords still count.
         self.store.run_write(charge)
 
-    def login(self, email: str, password: str, ip: str) -> AuthResult:
+    def login(self, email: str, password: str, ip: str, *, remember: bool = False) -> AuthResult:
+        if type(remember) is not bool:
+            raise DomainError("invalid_request", 422)
         self.charge_auth_attempt(ip, email=email)
         normalized = security.normalize_email(email)
         if normalized is None or not security.valid_password(password):
@@ -416,7 +419,7 @@ class Service:
             current = tx.get_account(account.uid)
             if current is None or not current.enabled or current.password_hash != encoded:
                 raise DomainError("invalid_credentials", 401)
-            return _insert_session(tx, current, access, refresh, self._now())
+            return _insert_session(tx, current, access, refresh, self._now(), remember=remember)
 
         return self.store.run_write(login)
 

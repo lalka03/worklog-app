@@ -124,7 +124,7 @@ def _json_number(value):
     return number
 
 
-def _read_body(event, headers, fields):
+def _read_body(event, headers, fields, optional_fields=frozenset()):
     body = event.get("body")
     if body is None or body == "":
         if fields:
@@ -151,7 +151,7 @@ def _read_body(event, headers, fields):
     except (ValueError, UnicodeError, binascii.Error, RecursionError):
         raise _invalid_request() from None
 
-    if not isinstance(result, dict) or result.keys() != fields:
+    if not isinstance(result, dict) or not fields <= result.keys() <= fields | optional_fields:
         raise _invalid_request()
     return result
 
@@ -180,7 +180,7 @@ def _access_token(headers):
 
 def _public_auth(service, action, body, ip):
     if action == "login":
-        return service.login(body["email"], body["password"], ip)
+        return service.login(body["email"], body["password"], ip, remember=body.get("remember", False))
     service.charge_auth_attempt(ip, scope=action, email=body.get("email"))
     if action == "register":
         return service.register(body["email"], body["password"], body["invite"])
@@ -193,7 +193,7 @@ def _public_auth(service, action, body, ip):
 def _dispatch(event, method, path, argument, headers, ip, service):
     if path.startswith("/auth/") and argument in _AUTH_FIELDS:
         _read_query(event, path)
-        body = _read_body(event, headers, _AUTH_FIELDS[argument])
+        body = _read_body(event, headers, _AUTH_FIELDS[argument], {"remember"} if argument == "login" else set())
         return _public_auth(service or _get_service(), argument, body, ip)
 
     token = _access_token(headers)

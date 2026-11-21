@@ -28,10 +28,13 @@
     return null;
   }
 
-  function create({baseUrl, fetch:send, tokenStore=memoryStore(), timeoutMs=12000, onSession=()=>{}}){
+  function create({baseUrl, fetch:send, tokenStore=memoryStore(), rememberStore=null, timeoutMs=12000, onSession=()=>{}}){
     const base = httpsBase(baseUrl);
     let generation = 0;
     let renewal = null;
+    let remembered = false;
+    let storageQueue = Promise.resolve();
+    let storageEmpty = false;
 
     async function request(path, {method='GET', body, token}={}){
       if(!base) throw new ApiError('unconfigured');
@@ -91,24 +94,94 @@
       catch(e){} // Local logout is immediate, including when offline.
     }
 
-    async function authenticate(action, body){
+    // Serialize native operations, so a late write cannot outlive logout or a new login.
+    function storage(current, operation){
+      if(!rememberStore) return Promise.resolve(null);
+      const task=storageQueue.then(async()=>{
+        sameGeneration(current);
+        let value;
+        try {value=await operation(rememberStore);}
+        catch(e){throw new ApiError('secure_storage');}
+        sameGeneration(current);
+        return value;
+      });
+      storageQueue=task.catch(()=>{});
+      return task;
+    }
+
+    function clearSaved(current){
+      return storage(current,async store=>{
+        if(!storageEmpty) await store.clear();
+        storageEmpty=true;
+      });
+    }
+
+    async function install(current,result,keep){
+      try {
+        sameGeneration(current);
+        if(keep) await storage(current,async store=>{
+          storageEmpty=false;
+          await store.set(result.refreshToken);
+        });
+        sameGeneration(current);
+        tokenStore.set(result);
+        remembered=keep;
+      } catch(e){
+        void revoke(result.accessToken);
+        if(current===generation && keep){
+          remembered=false;
+          await clearSaved(current);
+        }
+        throw e;
+      }
+    }
+
+    async function authenticate(action, body, keep=false){
       const current = ++generation;
       tokenStore.clear();
       renewal = null;
+      remembered=false;
+      if(rememberStore) await clearSaved(current);
+      sameGeneration(current);
       const result = validateAuth(await request('/auth/'+action,{method:'POST',body}));
-      if(current!==generation){
-        void revoke(result.accessToken);
-        sameGeneration(current);
-      }
-      tokenStore.set(result);
+      await install(current,result,keep);
+      sameGeneration(current);
       return result.user;
     }
 
-    function expire(current){
+    async function expire(current){
       if(current===generation && tokenStore.get()){
         tokenStore.clear();
+        remembered=false;
         onSession(null);
+        await clearSaved(current);
       }
+    }
+
+    async function restore(){
+      if(!rememberStore) return null;
+      const current=++generation;
+      tokenStore.clear(); renewal=null; remembered=false;
+      const saved=await storage(current,async store=>{
+        const token=await store.get();
+        storageEmpty=!token;
+        return token;
+      });
+      sameGeneration(current);
+      if(!saved) return null;
+      let result;
+      try {
+        result=validateAuth(await request('/auth/renew',{method:'POST',body:{refreshToken:saved}}));
+      } catch(e){
+        sameGeneration(current);
+        if(e.status!==401) throw e;
+        await clearSaved(current);
+        sameGeneration(current);
+        return null;
+      }
+      await install(current,result,true);
+      sameGeneration(current);
+      return result.user;
     }
 
     async function renewSession(current, failedAccess){
@@ -124,12 +197,13 @@
           }
           activeTokens(current);
           if(result.user.uid!==tokens.user.uid) throw new ApiError('invalid_session',401);
-          tokenStore.set(result);
+          await install(current,result,remembered);
+          sameGeneration(current);
           if(result.user.role!==tokens.user.role) onSession(result.user);
           return result;
         } catch(e){
           sameGeneration(current);
-          if(e.status===401) expire(current);
+          if(e.status===401 || e.code==='secure_storage') await expire(current);
           throw e;
         }
       })();
@@ -151,7 +225,7 @@
         try {payload=await withToken(renewed.accessToken);}
         catch(retryError){
           sameGeneration(current);
-          if(retryError.status===401) expire(current);
+          if(retryError.status===401) await expire(current);
           throw retryError;
         }
       }
@@ -179,16 +253,22 @@
     }
 
     return {
-      login:(email,password)=>authenticate('login',{email,password}),
+      login:(email,password,remember=false)=>{
+        const keep=remember===true && !!rememberStore;
+        return authenticate('login',{email,password,...(keep?{remember:true}:{})},keep);
+      },
+      restore,
       register:(email,password,invite)=>authenticate('register',{email,password,invite}),
       reset:(code,newPassword)=>request('/auth/reset',{method:'POST',body:{code,newPassword}}),
       renew:async()=> (await renewSession(generation)).user,
       async logout(){
         const tokens = tokenStore.get();
-        generation++;
+        const current=++generation;
         tokenStore.clear();
         renewal=null;
-        if(tokens) await revoke(tokens.accessToken);
+        remembered=false;
+        try {await clearSaved(current);}
+        finally {if(tokens) await revoke(tokens.accessToken);}
       },
       getWorklog:()=>authorized('/me/worklog'),
       putWorklog:({data:{version, settings, days},expectedRevision,mutationId})=>authorized('/me/worklog',{

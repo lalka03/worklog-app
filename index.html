@@ -188,7 +188,14 @@ let accountError='', authMode='login', adminData=null, session=0;
 let sync=null, syncState=null, syncTimer=null, syncDelay=2000;
 let invites=[], inviteBusy=false, inviteError='', adminSecret=null, cancelConfirm=null;
 let DB=normalizeRemote();
-const api=WorklogApi.create({baseUrl:WORKLOG_API_BASE_URL,fetch:(...args)=>fetch(...args),onSession:user=>{
+const nativeSession=(()=>{
+  const capacitor=window.Capacitor;
+  if(!capacitor?.isNativePlatform?.() || !capacitor.isPluginAvailable('RememberedSession')) return null;
+  const plugin=capacitor.Plugins.RememberedSession;
+  return {get:async()=>(await plugin.get()).token,set:token=>plugin.set({token}),clear:()=>plugin.clear()};
+})();
+let restoreError='', restoring=false, forgetting=false, forgetFailed=false;
+const api=WorklogApi.create({baseUrl:WORKLOG_API_BASE_URL,fetch:(...args)=>fetch(...args),rememberStore:nativeSession,onSession:user=>{
   if(!user){
     clearAccount();
     accountError='Сеанс завершён. Войдите снова.';
@@ -220,6 +227,7 @@ function clearAccount(){
   sync=null; syncState=null; syncDelay=2000;
   activeUser=null; scope=null; isAdmin=null; adminData=null;
   authMode='login'; accountError=''; authReady=true;
+  restoreError=''; restoring=false; forgetting=false; forgetFailed=false;
   employeeView=newEmployeeView(); employeesLoading=false; employeesError='';
   invites=[]; inviteBusy=false; inviteError=''; adminSecret=null;
   cancelConfirm?.();
@@ -490,6 +498,7 @@ function renderLogin(app){
   ${resetting?'':'<div class="input-group"><input id="loginEmail" type="email" autocomplete="username" placeholder=" " required maxlength="254"><label for="loginEmail">Электронная почта</label></div>'}
   <div class="input-group"><input id="loginPassword" type="password" autocomplete="${authMode==='login'?'current-password':'new-password'}" placeholder=" " required minlength="12" maxlength="128"><label for="loginPassword">${resetting?'Новый пароль':'Пароль'}</label></div>
   ${registering || resetting?`<div class="input-group"><input id="loginInvite" type="text" autocapitalize="off" spellcheck="false" autocomplete="off" placeholder=" " maxlength="128" required><label for="loginInvite">${registering?'Код приглашения':'Код восстановления'}</label></div>`:''}
+  ${!registering && !resetting && nativeSession?'<label class="checkbox-row"><input id="loginRemember" type="checkbox"><span>Запомнить меня на 30 дней</span></label>':''}
   <div style="display:grid;gap:10px"><button class="btn primary" type="submit">${registering?'Зарегистрироваться':resetting?'Установить пароль':'Войти'}</button>
   ${authMode==='login'?'<button class="btn ghost" type="button" id="registerBtn">Зарегистрироваться</button><button class="btn" type="button" id="resetBtn">Забыл пароль</button>':'<button class="btn ghost" type="button" id="loginBack">Ко входу</button>'}</div></form>
   <p class="muted" id="loginStatus" role="status"></p></div>`;
@@ -520,7 +529,7 @@ function renderLogin(app){
         authMode='login'; accountError='Пароль обновлён. Войдите с новым паролем.'; render();
       } else {
         const user=registering?await api.register(email.value.trim(),password.value,code.value.trim())
-          :await api.login(email.value.trim(),password.value);
+          :await api.login(email.value.trim(),password.value,nativeSession && document.getElementById('loginRemember')?.checked===true);
         if(current===session) await bindAccount(user);
       }
     } catch(e){
@@ -528,13 +537,46 @@ function renderLogin(app){
       const messages={unconfigured:'Сервер приложения не настроен.',network:'Нет связи с сервером.',timeout:'Сервер не ответил. Повторите попытку.',
         invalid_credentials:'Проверьте электронную почту и пароль.',invalid_invite:'Приглашение недействительно или уже использовано.',
         invalid_reset:'Код восстановления недействителен или уже использован.',invalid_email:'Проверьте адрес электронной почты.',
-        invalid_password:'Пароль должен содержать от 12 до 128 символов.',rate_limited:'Слишком много попыток. Повторите позже.'};
+        invalid_password:'Пароль должен содержать от 12 до 128 символов.',rate_limited:'Слишком много попыток. Повторите позже.',
+        secure_storage:'Не удалось сохранить защищённый сеанс. Попробуйте войти без галочки.'};
       status.textContent=messages[e.code]||'Не удалось выполнить запрос. Проверьте данные и повторите попытку.';
     } finally {
       submitting=false;
       if(current===session) buttons.forEach(button=>button.disabled=false);
     }
   };
+}
+async function restoreRemembered(){
+  if(!nativeSession || restoring || forgetting || forgetFailed) return;
+  const current=session;
+  authReady=false; restoring=true; restoreError=''; render();
+  try {
+    const user=await api.restore();
+    if(current!==session) return;
+    if(user) await bindAccount(user);
+    else {authReady=true; render();}
+  } catch(e){
+    if(current!==session) return;
+    restoreError=e.code==='secure_storage'?'Защищённый сеанс недоступен.': 'Не удалось проверить сохранённый вход. Проверьте подключение к интернету.';
+  } finally {
+    if(current===session){restoring=false;render();}
+  }
+}
+async function forgetRemembered(){
+  if(forgetting) return;
+  clearAccount();
+  const current=session;
+  authReady=false; forgetting=true; render();
+  try {await api.logout(); if(current===session) authReady=true;}
+  catch(e){if(current===session){forgetFailed=true;restoreError='Не удалось удалить сохранённый сеанс. Повторите выход.';}}
+  finally {if(current===session){forgetting=false;render();}}
+}
+function renderRestore(app){
+  if(restoring || forgetting){app.textContent=forgetting?'Выход…':'Проверка сохранённого входа…';return;}
+  app.innerHTML=`<div class="card"><p id="restoreMessage" role="status"></p><div style="display:grid;gap:10px">${forgetFailed?'':'<button class="btn primary" id="restoreRetry">Повторить</button>'}<button class="btn" id="restoreForget">${forgetFailed?'Повторить выход':'Выйти и войти заново'}</button></div></div>`;
+  document.getElementById('restoreMessage').textContent=restoreError;
+  if(!forgetFailed) document.getElementById('restoreRetry').onclick=()=>restoreRemembered();
+  document.getElementById('restoreForget').onclick=()=>forgetRemembered();
 }
 function updateEmployeeTab(){
   document.getElementById('navEmployees').style.display=authReady && isAdmin===true?'flex':'none';
@@ -762,12 +804,7 @@ function renderAdmin(app){
   body.querySelector('#nextM').onclick=()=>moveMonth(1);
   body.querySelectorAll('.day-item[data-date]').forEach(el=>{el.onclick=()=>{employeeView.date=el.dataset.date;render();};});
 }
-document.getElementById('btnLogout').onclick=async()=>{
-  clearAccount();
-  const logout=api.logout();
-  render();
-  await logout;
-};
+document.getElementById('btnLogout').onclick=()=>forgetRemembered();
 document.getElementById('syncKeepServer').onclick=()=>recoverSync('server');
 document.getElementById('syncRetryLocal').onclick=()=>recoverSync('retry-local');
 document.getElementById('syncExportDraft').onclick=event=>{
@@ -790,7 +827,7 @@ function render(){
   if(!employee){
     hTitle.textContent = 'Worklog Yandex Test';
     hSub.textContent = activeUser ? (activeUser.email || '') : 'Тестовая версия';
-    if(!authReady){app.textContent='Подключение…'; return;}
+    if(!authReady){renderRestore(app); return;}
     if(activeUser){app.textContent=accountError || 'Доступ недоступен'; return;}
     renderLogin(app); return;
   }
@@ -1291,7 +1328,8 @@ document.getElementById('btnTheme').onclick = () => {
 };
 (function init(){
   initTheme();
-  render();
+  if(nativeSession) void restoreRemembered();
+  else render();
 })();
 </script>
 </body>

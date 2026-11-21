@@ -91,3 +91,24 @@ test('workflow tests the Yandex branch and signs only a manual release from that
   assert.match(release, /WORKLOG_API_BASE_URL:.*vars\.WORKLOG_API_BASE_URL[\s\S]*node scripts\/stage-pilot-assets\.cjs[\s\S]*assembleRelease/);
   assert.match(release, /name: WorklogYandexTest-release/);
 });
+
+test('native staging installs Android Keystore plugin and activity in the immutable pilot package',t=>{
+  const directory=fixture(t);
+  const packageDir=path.join(directory,'android/app/src/main/java/com/worklog/app/yandex/test');
+  fs.mkdirSync(packageDir,{recursive:true});
+  fs.copyFileSync(path.join(root,'capacitor.config.json'),path.join(directory,'capacitor.config.json'));
+  fs.writeFileSync(path.join(packageDir,'MainActivity.java'),'package com.worklog.app.yandex.test;\nimport com.getcapacitor.BridgeActivity;\npublic class MainActivity extends BridgeActivity {}\n');
+  const script=path.join(root,'scripts/stage-android-session.cjs');
+  const run=spawnSync(process.execPath,[script],{cwd:directory,encoding:'utf8'});
+  assert.equal(run.status,0,run.stderr);
+  const plugin=fs.readFileSync(path.join(packageDir,'RememberedSessionPlugin.java'),'utf8');
+  const activity=fs.readFileSync(path.join(packageDir,'MainActivity.java'),'utf8');
+  assert.match(plugin,/@CapacitorPlugin\(name = "RememberedSession"\)/);
+  assert.match(plugin,/AndroidKeyStore/);
+  assert.match(plugin,/AES\/GCM\/NoPadding/);
+  assert.match(plugin,/getNoBackupFilesDir\(\)/);
+  assert.match(plugin,/finishWrite\(output\);[\s\S]*Arrays\.equals\(.*readFully\(\)/);
+  assert.match(activity,/registerPlugin\(RememberedSessionPlugin.class\);[\s\S]*super.onCreate/);
+  const workflow=fs.readFileSync(path.join(root,'.github/workflows/build-apk.yml'),'utf8');
+  assert.match(workflow,/npx cap add android[\s\S]*node scripts\/stage-android-session.cjs[\s\S]*assembleRelease/);
+});

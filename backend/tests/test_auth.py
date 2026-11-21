@@ -34,6 +34,33 @@ class AuthTest(unittest.TestCase):
         code = self.service.create_invite(self.owner)["code"]
         return self.service.register(email, password, code)
 
+    def test_remembered_login_has_fixed_thirty_day_expiry(self):
+        self.register_employee()
+        started = self.now
+        auth = self.service.login("employee@example.test", PASSWORD, "192.0.2.1", remember=True)
+        self.now = started + 8 * 86400
+        auth = self.service.renew(auth["refreshToken"])
+        self.now = started + 30 * 86400 - 1
+        auth = self.service.renew(auth["refreshToken"])
+        self.assertEqual(self.service.authenticate(auth["accessToken"]).role, "employee")
+        self.now += 1
+        self.assert_error("invalid_session", 401, self.service.renew, auth["refreshToken"])
+        self.assert_error("invalid_session", 401, self.service.authenticate, auth["accessToken"])
+
+    def test_unchecked_login_and_legacy_login_expire_after_seven_days(self):
+        self.register_employee()
+        legacy = self.service.login("employee@example.test", PASSWORD, "192.0.2.1")
+        unchecked = self.service.login("employee@example.test", PASSWORD, "192.0.2.1", remember=False)
+        self.now += 7 * 86400
+        for auth in (legacy, unchecked):
+            self.assert_error("invalid_session", 401, self.service.renew, auth["refreshToken"])
+
+    def test_remembered_session_revoked_on_logout(self):
+        self.register_employee()
+        auth = self.service.login("employee@example.test", PASSWORD, "192.0.2.1", remember=True)
+        self.service.logout(auth["accessToken"])
+        self.assert_error("invalid_session", 401, self.service.renew, auth["refreshToken"])
+
     def test_register_consumes_invite(self):
         invite = self.service.create_invite(self.owner)
         auth = self.service.register("  Employee@Example.TEST  ", PASSWORD, invite["code"])
@@ -106,11 +133,12 @@ class AuthTest(unittest.TestCase):
     def test_reset_revokes_sessions(self):
         auth = self.register_employee()
         another = self.service.login("employee@example.test", PASSWORD, "192.0.2.1")
+        remembered = self.service.login("employee@example.test", PASSWORD, "192.0.2.1", remember=True)
         uid = auth["user"]["uid"]
         pending = self.service.issue_reset(self.owner, uid)
         reset = self.service.issue_reset(self.owner, uid)
         self.service.redeem_reset(reset["code"], NEW_PASSWORD)
-        for session in (auth, another):
+        for session in (auth, another, remembered):
             with self.subTest(access=session is auth):
                 self.assert_error("invalid_session", 401, self.service.authenticate, session["accessToken"])
                 self.assert_error("invalid_session", 401, self.service.renew, session["refreshToken"])

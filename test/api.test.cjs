@@ -9,6 +9,112 @@ const ok = (value) => Response.json(value);
 const error = (status, code) => Response.json({error:code}, {status});
 const deferred = () => { let resolve; const promise = new Promise(value=>{resolve=value;}); return {promise,resolve}; };
 
+function protectedStore(initial=null){
+  let value=initial;
+  return {get:async()=>value,set:async token=>{assert.equal(typeof token,'string'); value=token;},clear:async()=>{value=null;}};
+}
+
+test('remembered login stores only refresh credential and restores with rotation',async()=>{
+  const store=protectedStore(), requests=[];
+  const fetch=async(url,options)=>{
+    const path=new URL(url).pathname, body=JSON.parse(options.body);
+    requests.push([path,body]);
+    if(path.endsWith('/login')) return ok(auth('a'));
+    return ok(auth(body.refreshToken==='refresh-a'?'b':'c'));
+  };
+  const first=create({baseUrl,fetch,rememberStore:store});
+  await first.login(user.email,'secret',true);
+  assert.equal(await store.get(),'refresh-a');
+  assert.deepEqual(requests[0][1],{email:user.email,password:'secret',remember:true});
+  const reopened=create({baseUrl,fetch,rememberStore:store});
+  assert.deepEqual(await reopened.restore(),user);
+  assert.equal(await store.get(),'refresh-b');
+  assert.deepEqual(await reopened.renew(),user);
+  assert.equal(await store.get(),'refresh-c');
+});
+
+test('unchecked login clears previous remembered credential and unsupported storage does not request 30 days',async()=>{
+  const store=protectedStore('old');
+  const fetch=async(url,options)=>{assert.equal(JSON.parse(options.body).remember,undefined);return ok(auth('a'));};
+  await create({baseUrl,fetch,rememberStore:store}).login(user.email,'secret');
+  assert.equal(await store.get(),null);
+  await create({baseUrl,fetch}).login(user.email,'secret',true);
+});
+
+test('offline restore preserves credential for retry; rejected restore clears it',async()=>{
+  const store=protectedStore('refresh-a');
+  let mode='offline';
+  const api=create({baseUrl,rememberStore:store,fetch:async()=>{
+    if(mode==='offline') throw new TypeError('offline');
+    return error(401,'invalid_session');
+  }});
+  await assert.rejects(api.restore(),{code:'network'});
+  assert.equal(await store.get(),'refresh-a');
+  await assert.rejects(api.getWorklog(),{code:'invalid_session'});
+  mode='expired';
+  assert.equal(await api.restore(),null);
+  assert.equal(await store.get(),null);
+});
+
+test('logout while restore is pending cannot recreate a remembered account',async()=>{
+  const store=protectedStore('refresh-a'), started=deferred(), response=deferred();
+  const api=create({baseUrl,rememberStore:store,fetch:async url=>{
+    if(url.endsWith('/renew')){started.resolve();return response.promise;}
+    return ok({});
+  }});
+  const restore=api.restore();
+  await started.promise;
+  await api.logout();
+  response.resolve(ok(auth('b')));
+  await assert.rejects(restore,{code:'session_changed'});
+  assert.equal(await store.get(),null);
+});
+
+test('logout waits for delayed protected write and clears it before completion',async()=>{
+  const store=protectedStore(), started=deferred(), release=deferred(), set=store.set;
+  store.set=async token=>{started.resolve();await release.promise;await set(token);};
+  const api=create({baseUrl,rememberStore:store,fetch:async url=>url.endsWith('/login')?ok(auth('a')):ok({})});
+  const login=api.login(user.email,'secret',true);
+  await started.promise;
+  const logout=api.logout();
+  release.resolve();
+  await assert.rejects(login,{code:'session_changed'});
+  await logout;
+  assert.equal(await store.get(),null);
+});
+
+test('failed secure storage write never exposes restored account',async()=>{
+  const store=protectedStore('refresh-a');
+  store.set=async()=>{throw new Error('keystore unavailable');};
+  const api=create({baseUrl,rememberStore:store,fetch:async url=>url.endsWith('/renew')?ok(auth('b')):ok({})});
+  await assert.rejects(api.restore(),{code:'secure_storage'});
+  assert.equal(await store.get(),null);
+  await assert.rejects(api.getWorklog(),{code:'invalid_session'});
+});
+
+test('ordinary login remains possible when empty protected storage cannot write or clear',async()=>{
+  const store=protectedStore();
+  store.clear=async()=>{throw new Error('storage unavailable');};
+  store.set=async()=>{throw new Error('storage unavailable');};
+  const api=create({baseUrl,rememberStore:store,fetch:async(url,options)=>{
+    assert.equal(JSON.parse(options.body).remember,undefined);
+    return ok(auth('a'));
+  }});
+  assert.equal(await api.restore(),null);
+  assert.deepEqual(await api.login(user.email,'secret'),user);
+});
+
+test('logout immediately following token install cancels the stale login return',async()=>{
+  let tokens=null, api, logout;
+  const tokenStore={get:()=>tokens,clear:()=>{tokens=null;},set:value=>{
+    tokens=value; queueMicrotask(()=>{logout=api.logout();});
+  }};
+  api=create({baseUrl,tokenStore,rememberStore:protectedStore(),fetch:async url=>url.endsWith('/login')?ok(auth('a')):ok({})});
+  await assert.rejects(api.login(user.email,'secret',true),{code:'session_changed'});
+  await logout;
+  await assert.rejects(api.getWorklog(),{code:'invalid_session'});
+});
+
 test('test_login_register_invite_payload', async () => {
   const requests=[];
   const api=create({baseUrl,fetch:async (url, options)=>{requests.push([new URL(url).pathname,JSON.parse(options.body)]); return ok(auth('a'));}});

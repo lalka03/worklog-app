@@ -49,6 +49,18 @@ class HttpTest(unittest.TestCase):
     def request(self, *args, **kwargs):
         return handle(event(*args, **kwargs), self.service)
 
+    def test_only_login_accepts_optional_boolean_remember(self):
+        invite = self.service.create_invite(self.admin)
+        credentials = {"email": "remember@example.test", "password": PASSWORD}
+        self.assert_reply(self.request("POST", "/auth/register", {**credentials, "invite": invite["code"], "remember": True}), 422)
+        self.assert_reply(self.request("POST", "/auth/register", {**credentials, "invite": invite["code"]}), 200)
+        for invalid in (None, 1, 0, "true", [], {}):
+            self.assert_reply(self.request("POST", "/auth/login", {**credentials, "remember": invalid}), 422, {"error": "invalid_request"})
+        self.assert_reply(self.request("POST", "/auth/login", {**credentials, "remember": True, "role": "admin"}), 422)
+        auth = self.assert_reply(self.request("POST", "/auth/login", {**credentials, "remember": True}), 200)
+        self.assertEqual(auth["user"]["role"], "employee")
+        self.assert_reply(self.request("POST", "/auth/renew", {"refreshToken": auth["refreshToken"], "remember": True}), 422)
+
     def test_staff_cannot_list_or_read_other(self):
         for method, path in (
             ("GET", "/admin/employees"), ("GET", f"/admin/employees/{self.admin.uid}"),

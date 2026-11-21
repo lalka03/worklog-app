@@ -10,7 +10,7 @@ const admin='00000000-0000-4000-8000-000000000003';
 const html=fs.readFileSync('index.html','utf8');
 const WorklogApi={create:options=>require('../api.js').create({...options,baseUrl:'https://worklog.example.test'})};
 
-function appHarness(){
+function appHarness({remembered=null,native=false,renewOffline=false,clearFails=false}={}){
   const calls=[], records=new Map(), cached=new Map(), readErrors=new Map(), resetResponses=new Map(), clipboard=[];
   const elements=new Map();
   function makeElement(){
@@ -40,6 +40,13 @@ function appHarness(){
       return respond({user:{uid:id,email:body.email,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id,expiresAt:'2026-11-20T12:00:00Z'});
     }
     if(path==='/auth/logout') return respond({});
+    if(path==='/auth/renew'){
+      if(renewOffline) throw new TypeError('offline');
+      const id=body.refreshToken;
+      const name=users.get(id);
+      if(!name) return respond({error:'invalid_session'},401);
+      return respond({user:{uid:id,email:`${name}@example.test`,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id});
+    }
     if(path==='/auth/reset') return respond({});
     if(readErrors.has(path)) return respond({error:'forbidden'},403);
     if(path==='/me/worklog'){
@@ -57,7 +64,9 @@ function appHarness(){
   };
   const ctx=vm.createContext({WorklogAccounts:accounts,WorklogApi,WorklogSync:require('../sync.js'),
     document:{getElementById:element,querySelectorAll:()=>[],createElement:makeElement,addEventListener(){}},
-    window:{scrollTo(){},addEventListener(){}},fetch,URL,TextEncoder,navigator:{clipboard:{writeText:async value=>clipboard.push(value)}},
+    window:{scrollTo(){},addEventListener(){},...(native?{Capacitor:{isNativePlatform:()=>true,isPluginAvailable:name=>name==='RememberedSession',Plugins:{RememberedSession:{
+      get:async()=>({token:remembered}),set:async({token})=>{remembered=token;},clear:async()=>{if(clearFails) throw new Error('storage unavailable');remembered=null;}
+    }}}}:{})},fetch,URL,TextEncoder,navigator:{clipboard:{writeText:async value=>clipboard.push(value)}},
     localStorage:{getItem:k=>cached.get(k)||null,setItem:(k,v)=>cached.set(k,v),removeItem:k=>cached.delete(k)},
     setTimeout:()=>1,clearTimeout:()=>{},console});
   const source=html.match(/<script>\s*([\s\S]*?)<\/script>/)[1];
@@ -67,6 +76,51 @@ function appHarness(){
     login:name=>run(`(async()=>bindAccount(await api.login('${name}@example.test','sample-password')))()`),
     logout:()=>run("document.getElementById('btnLogout').onclick()")};
 }
+
+test('Android login offers unchecked remember option, browser and registration do not',()=>{
+  const h=appHarness({native:true});
+  h.run("renderLogin(document.getElementById('app'))");
+  assert.match(h.element('app').innerHTML,/id="loginRemember" type="checkbox"\s*>/);
+  assert.match(h.element('app').innerHTML,/Запомнить меня.*30 дней/);
+  h.run("authMode='register';renderLogin(document.getElementById('app'))");
+  assert.doesNotMatch(h.element('app').innerHTML,/loginRemember/);
+  const web=appHarness();
+  web.run("renderLogin(document.getElementById('app'))");
+  assert.doesNotMatch(web.element('app').innerHTML,/loginRemember/);
+});
+
+test('restored Android account binds only after server renewal',async()=>{
+  const h=appHarness({native:true,remembered:alpha});
+  assert.equal(h.run('activeUser'),null);
+  await h.run('restoreRemembered()');
+  assert.equal(h.run('activeUser.uid'),alpha);
+  assert.equal(h.calls[0].path,'/auth/renew');
+  assert.ok(h.calls.slice(1).every(call=>!call.uid || call.uid===alpha));
+});
+
+test('offline Android restore keeps private UI locked and permits local forget',async()=>{
+  const h=appHarness({native:true,remembered:alpha,renewOffline:true});
+  await h.run('restoreRemembered()');
+  assert.equal(h.run('activeUser'),null);
+  assert.equal(h.run('authReady'),false);
+  h.run('originalRender()');
+  assert.match(h.element('app').innerHTML,/Повторить/);
+  assert.match(h.element('app').innerHTML,/Выйти/);
+  await h.run('forgetRemembered()');
+  assert.equal(h.run('authReady'),true);
+  assert.equal(h.run('activeUser'),null);
+  assert.equal(h.calls.length,1);
+});
+
+test('failed local forget never offers to restore the account the user just left',async()=>{
+  const h=appHarness({native:true,remembered:alpha,renewOffline:true,clearFails:true});
+  await h.run('restoreRemembered()');
+  await h.run('forgetRemembered()');
+  h.run('originalRender()');
+  assert.equal(h.run('activeUser'),null);
+  assert.match(h.element('app').innerHTML,/Повторить выход/);
+  assert.doesNotMatch(h.element('app').innerHTML,/id="restoreRetry"/);
+});
 
 test('employee login, logout and next login never reuse another employee data or storage', async()=>{
   const h=appHarness();
