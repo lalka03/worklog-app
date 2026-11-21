@@ -1,10 +1,11 @@
 import base64
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 from backend.index import handle
-from backend.security import digest
+from backend.security import digest, hash_password
 from backend.service import DomainError, Service
 from backend.store import Session, StoreUnavailable
 from fake_store import FakeStore, FakeTransaction, seed_test_session
@@ -48,6 +49,72 @@ class HttpTest(unittest.TestCase):
 
     def request(self, *args, **kwargs):
         return handle(event(*args, **kwargs), self.service)
+
+    def recovery_password(self):
+        self.store.run_write(lambda tx: tx.update_account_security(replace(
+            tx.get_account(self.admin.uid), password_hash=hash_password(PASSWORD))))
+
+    def test_admin_recovery_routes_and_strict_body(self):
+        self.recovery_password()
+        path = "/admin/recovery"
+        self.assert_reply(self.request("GET", path, token=ADMIN_TOKEN), 200, {"active": False})
+        for method in ("POST", "DELETE"):
+            self.assert_reply(self.request(method, path, {}, token=ADMIN_TOKEN), 422, {"error": "invalid_request"})
+            self.assert_reply(self.request(method, path, {"password": PASSWORD, "uid": self.staff.uid}, token=ADMIN_TOKEN), 422, {"error": "invalid_request"})
+            self.assert_reply(self.request(method, path, {"password": "wrong password"}, token=ADMIN_TOKEN), 422, {"error": "invalid_current_password"})
+        self.assert_reply(self.request("GET", path, {"password": PASSWORD}, token=ADMIN_TOKEN), 422, {"error": "invalid_request"})
+        self.assert_reply(self.request("PUT", path, {"password": PASSWORD}, token=ADMIN_TOKEN), 405)
+        for method in ("GET", "POST", "DELETE"):
+            body = None if method == "GET" else {"password": PASSWORD}
+            self.assert_reply(self.request(method, path, body, token=STAFF_TOKEN), 403, {"error": "forbidden"})
+            self.assert_reply(self.request(method, path, body), 401, {"error": "invalid_session"})
+        self.assert_reply(self.request("OPTIONS", path, origin="https://localhost", headers={"access-control-request-method": "DELETE", "access-control-request-headers": "content-type,x-worklog-authorization"}), 204)
+        issued = self.assert_reply(self.request("POST", path, {"password": PASSWORD}, token=ADMIN_TOKEN), 200)
+        self.assertEqual(set(issued), {"code"})
+        self.assertTrue(issued["code"])
+        status = self.request("GET", path, token=ADMIN_TOKEN)
+        self.assert_reply(status, 200, {"active": True})
+        self.assertNotIn(issued["code"], status["body"])
+        self.assert_reply(self.request("DELETE", path, {"password": PASSWORD}, token=ADMIN_TOKEN), 200, {})
+        self.assert_reply(self.request("GET", path, token=ADMIN_TOKEN), 200, {"active": False})
+
+    def test_admin_recovery_public_endpoint_is_generic_and_revokes_sessions(self):
+        self.recovery_password()
+        code = self.assert_reply(self.request("POST", "/admin/recovery", {"password": PASSWORD}, token=ADMIN_TOKEN), 200)["code"]
+        new_password = "synthetic changed password"
+        body = {"email": self.admin.email, "code": code, "newPassword": new_password}
+        self.assert_reply(self.request("POST", "/auth/recovery", {**body, "role": "admin"}), 422, {"error": "invalid_request"})
+        for email, supplied in ((self.staff.email, code), ("missing@example.test", code), (self.admin.email, "bad code")):
+            failure = self.request("POST", "/auth/recovery", {**body, "email": email, "code": supplied})
+            self.assert_reply(failure, 422, {"error": "invalid_recovery"})
+            self.assertNotIn(code, failure["body"])
+        self.assert_reply(self.request("POST", "/auth/recovery", body), 200, {})
+        self.assert_reply(self.request("POST", "/auth/recovery", body), 422, {"error": "invalid_recovery"})
+        self.assert_reply(self.request("GET", "/me/worklog", token=ADMIN_TOKEN), 401, {"error": "invalid_session"})
+        result = self.assert_reply(self.request("POST", "/auth/login", {"email": self.admin.email, "password": new_password}), 200)
+        self.assertEqual(result["user"]["uid"], self.admin.uid)
+        self.assert_reply(self.request("GET", "/me/worklog", token=STAFF_TOKEN), 200)
+
+    def test_admin_recovery_rate_limits_group_management_methods_and_normalize_email(self):
+        path = "/admin/recovery"
+        for i in range(10):
+            method = "POST" if i % 2 == 0 else "DELETE"
+            self.assert_reply(self.request(method, path, {"password": "wrong password"}, token=ADMIN_TOKEN, ip=f"192.0.2.{i+1}"), 422, {"error": "invalid_current_password"})
+        self.assert_reply(self.request("POST", path, {"password": "wrong password"}, token=ADMIN_TOKEN, ip="192.0.2.99"), 429, {"error": "rate_limited"})
+        for i in range(10):
+            self.assert_reply(self.request("POST", "/auth/recovery", {"email": " MISSING@example.test " if i % 2 else "missing@example.test", "code": "bad", "newPassword": PASSWORD}, ip=f"192.0.2.{i+1}"), 422, {"error": "invalid_recovery"})
+        self.assert_reply(self.request("POST", "/auth/recovery", {"email": "missing@example.test", "code": "bad", "newPassword": PASSWORD}, ip="192.0.2.99"), 429, {"error": "rate_limited"})
+
+    def test_public_recovery_ip_limit_across_distinct_emails(self):
+        for attempt in range(100):
+            body = {"email": f"recovery-{attempt}@example.test", "code": "bad", "newPassword": PASSWORD}
+            self.assert_reply(self.request("POST", "/auth/recovery", body, ip="192.0.2.1",
+                                           headers={"x-forwarded-for": f"198.51.100.{attempt + 1}"}),
+                              422, {"error": "invalid_recovery"})
+        self.assert_reply(self.request("POST", "/auth/recovery", body, ip="192.0.2.1"),
+                          429, {"error": "rate_limited"})
+        self.assert_reply(self.request("POST", "/auth/recovery", body, ip="192.0.2.2"),
+                          422, {"error": "invalid_recovery"})
 
     def test_only_login_accepts_optional_boolean_remember(self):
         invite = self.service.create_invite(self.admin)

@@ -128,6 +128,46 @@ test('test_login_register_invite_payload', async () => {
   ]);
 });
 
+test('administrator recovery sends the exact authorized management and public redemption requests',async()=>{
+  const admin={...user,role:'admin'}, code='synthetic-recovery-code-42', calls=[];
+  const api=create({baseUrl,fetch:async(url,options)=>{
+    const path=new URL(url).pathname;
+    if(path.endsWith('/login')) return ok({...auth('a'),user:admin});
+    calls.push([path,options.method,options.headers['X-Worklog-Authorization'],options.body && JSON.parse(options.body),options.cache]);
+    if(options.method==='GET') return ok({active:false});
+    if(path.endsWith('/admin/recovery') && options.method==='POST') return ok({code});
+    return ok({});
+  }});
+  await api.login(admin.email,'login-password');
+  assert.deepEqual(await api.recoveryStatus(),{active:false});
+  assert.deepEqual(await api.issueRecovery('current-password'),{code});
+  assert.deepEqual(await api.revokeRecovery('current-password'),{});
+  assert.deepEqual(await api.redeemRecovery(admin.email,code,'new-password'),{});
+  const bearer='Bearer test-access-credential-a';
+  assert.deepEqual(calls,[
+    ['/gateway/admin/recovery','GET',bearer,undefined,'no-store'],
+    ['/gateway/admin/recovery','POST',bearer,{password:'current-password'},'no-store'],
+    ['/gateway/admin/recovery','DELETE',bearer,{password:'current-password'},'no-store'],
+    ['/gateway/auth/recovery','POST',undefined,{email:admin.email,code,newPassword:'new-password'},'no-store']
+  ]);
+});
+
+test('a rejected current password keeps the verified administrator session',async()=>{
+  const calls=[];
+  const api=create({baseUrl,fetch:async url=>{
+    const path=new URL(url).pathname;
+    calls.push(path);
+    if(path.endsWith('/login')) return ok({...auth('a'),user:{...user,role:'admin'}});
+    if(path.endsWith('/admin/recovery')) return error(422,'invalid_current_password');
+    if(path.endsWith('/me/worklog')) return ok({revision:3});
+    assert.fail(`Unexpected request: ${path}`);
+  }});
+  await api.login(user.email,'login-password');
+  await assert.rejects(api.issueRecovery('wrong-password'),{code:'invalid_current_password',status:422});
+  assert.deepEqual(await api.getWorklog(),{revision:3});
+  assert.deepEqual(calls,['/gateway/auth/login','/gateway/admin/recovery','/gateway/me/worklog']);
+});
+
 test('test_token_never_in_localstorage', async () => {
   const previous=globalThis.localStorage;
   globalThis.localStorage={setItem(){assert.fail('tokens must stay in memory');},getItem(){assert.fail('no tokens from storage');}};

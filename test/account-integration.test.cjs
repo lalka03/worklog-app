@@ -23,8 +23,12 @@ function appHarness({remembered=null,native=false,renewOffline=false,clearFails=
   const elements=new Map();
   function makeElement(){
     const handlers=new Map();
+    let markup='';
     return {children:[],style:{},classList:{add(){},remove(){},toggle(){}},querySelectorAll:()=>[],
-      querySelector:()=>makeElement(), appendChild(child){this.children.push(child);}, replaceChildren(){this.children=[];},
+      get innerHTML(){return markup;},set innerHTML(value){markup=value;this.replaceChildren();},
+      querySelector:()=>makeElement(), appendChild(child){child.remove();child.parentNode=this;this.children.push(child);},
+      replaceChildren(){for(const child of [...this.children]) child.remove();},
+      remove(){if(this.parentNode){this.parentNode.children=this.parentNode.children.filter(child=>child!==this);this.parentNode=null;}},
       addEventListener:(name,fn)=>handlers.set(name,fn),removeEventListener:name=>handlers.delete(name),
       click(){return this.onclick ? this.onclick() : handlers.get('click')?.();},setAttribute(){},reportValidity:()=>true,textContent:'',value:''};
   }
@@ -59,6 +63,16 @@ function appHarness({remembered=null,native=false,renewOffline=false,clearFails=
       return respond({user:{uid:id,email:`${name}@example.test`,role:id===admin?'admin':'employee'},accessToken:id,refreshToken:id,...timing});
     }
     if(path==='/auth/reset') return respond({});
+    if(path==='/auth/recovery') return body.email==='admin@example.test' && body.code===controls.recoveryCode
+      ?respond({}):respond({error:'invalid_recovery'},422);
+    if(path==='/admin/recovery'){
+      if(uid!==admin) return respond({error:'forbidden'},403);
+      if(options.method==='GET') return respond({active:!!controls.recoveryCode});
+      if(body.password!==recoveryPassword) return respond({error:'invalid_current_password'},422);
+      if(options.method==='DELETE'){controls.recoveryCode=null;return respond({});}
+      controls.recoveryCode=controls.recoveryCode===issuedRecovery?replacementRecovery:issuedRecovery;
+      return respond({code:controls.recoveryCode});
+    }
     if(readErrors.has(path)) return respond({error:'forbidden'},403);
     if(path==='/me/worklog'){
       const current=records.get(uid)??{data:null,revision:0};
@@ -333,6 +347,167 @@ async function resetHarness(){
 }
 
 const resetCode={code:'synthetic-alpha-code',expiresAt:'2026-11-21T12:00:00Z'};
+const recoveryPassword='synthetic-current-password';
+const issuedRecovery='synthetic-first-recovery-code';
+const replacementRecovery='synthetic-next-recovery-code';
+
+function recoveryControl(h,label){
+  return descendants(h.element('app')).find(item=>item.textContent===label);
+}
+function recoveryField(h){
+  return descendants(h.element('app')).find(item=>item.type==='password');
+}
+async function openSettings(h){
+  h.run("setTab('settings');originalRender()");
+  await new Promise(done=>setImmediate(done));
+}
+
+test('security settings are limited to administrators with a verified online session',async()=>{
+  const h=appHarness();
+  await h.login('alpha');await openSettings(h);
+  assert.equal(recoveryControl(h,'Безопасность'),undefined);
+  assert.ok(!h.calls.some(call=>call.path==='/admin/recovery'));
+  await h.logout();await h.login('admin');await openSettings(h);
+  assert.ok(recoveryControl(h,'Безопасность'));
+  await h.fire('offline');
+  assert.equal(recoveryControl(h,'Безопасность'),undefined);
+  await h.fire('online');
+  assert.equal(recoveryControl(h,'Безопасность'),undefined);
+  await h.tick();
+  assert.ok(recoveryControl(h,'Безопасность'));
+});
+
+test('recovery confirmation clears a wrong password and displays the validation error in Settings',async()=>{
+  const h=appHarness();await h.login('admin');await openSettings(h);
+  const field=recoveryField(h);
+  assert.ok(field);
+  field.value='wrong-password';
+  const attempt=recoveryControl(h,'Создать резервный код').click();
+  assert.equal(field.value,'');
+  await attempt;
+  assert.ok(recoveryControl(h,'Неверный текущий пароль.'));
+  assert.equal(h.run('activeUser.uid'),admin);
+  assert.ok(!h.calls.some(call=>['/auth/renew','/auth/logout'].includes(call.path)));
+});
+
+test('Settings displays each generated code once, replaces it and revokes it',async()=>{
+  const h=appHarness({native:true});await h.login('admin',true);await openSettings(h);
+  recoveryField(h).value=recoveryPassword;
+  await recoveryControl(h,'Создать резервный код').click();
+  const output=recoveryControl(h,issuedRecovery),copy=recoveryControl(h,'Скопировать код');
+  assert.ok(output);
+  assert.ok(descendants(h.element('app')).some(item=>item.textContent.includes('отдельно')));
+  assert.deepEqual(h.clipboard,[]);
+  await copy.click();
+  assert.deepEqual(h.clipboard,[issuedRecovery]);
+  let exported;
+  Object.assign(h.ctx.window.Capacitor.Plugins,{
+    Filesystem:{writeFile:async({data})=>{exported=data;return {uri:'file:///test.json'};}},Share:{share:async()=>{}}
+  });
+  h.ctx.window.Capacitor.isPluginAvailable=()=>true;
+  await h.element('expBtn').onclick({currentTarget:h.element('expBtn')});
+  for(const persisted of [exported,JSON.stringify(h.record()),JSON.stringify([...h.cached])]){
+    assert.equal(typeof persisted,'string');
+    assert.ok(!persisted.includes(issuedRecovery) && !persisted.includes(recoveryPassword));
+  }
+  recoveryControl(h,'Скрыть код').click();
+  assert.equal(output.textContent,'');
+  await copy.click();
+  assert.deepEqual(h.clipboard,[issuedRecovery]);
+  await openSettings(h);
+  assert.equal(recoveryControl(h,issuedRecovery),undefined);
+  recoveryField(h).value=recoveryPassword;
+  await recoveryControl(h,'Заменить резервный код').click();
+  assert.ok(recoveryControl(h,replacementRecovery));
+  recoveryField(h).value=recoveryPassword;
+  await recoveryControl(h,'Отозвать код').click();
+  assert.equal(recoveryControl(h,replacementRecovery),undefined);
+  assert.ok(recoveryControl(h,'Создать резервный код'));
+  assert.equal(h.controls.recoveryCode,null);
+});
+
+for(const leave of ['navigation','logout','account change','disconnect','background']){
+  test(`a pending recovery code cannot appear after ${leave}`,async()=>{
+    const h=appHarness();await h.login('admin');await openSettings(h);
+    let respond;
+    h.deferred.set('/admin/recovery',new Promise(resolve=>{respond=resolve;}));
+    const field=recoveryField(h);
+    field.value=recoveryPassword;
+    const issue=recoveryControl(h,'Создать резервный код').click();
+    assert.equal(field.value,'');
+    assert.ok(h.calls.some(call=>call.path==='/admin/recovery' && call.method==='POST'));
+    if(leave==='navigation') h.run("setTab('home');originalRender()");
+    if(leave==='logout' || leave==='account change') await h.logout();
+    if(leave==='account change') await h.login('alpha');
+    if(leave==='disconnect') await h.fire('offline');
+    if(leave==='background'){h.ctx.document.hidden=true;await h.fire('visibilitychange');}
+    h.deferred.delete('/admin/recovery');
+    if(leave==='navigation' || leave==='account change') await openSettings(h);
+    if(leave==='disconnect'){await h.fire('online');await h.tick();}
+    if(leave==='background'){h.ctx.document.hidden=false;await h.fire('visibilitychange');}
+    respond(Response.json({code:issuedRecovery}));
+    await issue;h.run('originalRender()');
+    assert.equal(recoveryControl(h,issuedRecovery),undefined);
+    assert.deepEqual(h.clipboard,[]);
+  });
+}
+
+test('backgrounding the app clears the displayed backup code and password',async()=>{
+  const h=appHarness();await h.login('admin');await openSettings(h);
+  recoveryField(h).value=recoveryPassword;
+  await recoveryControl(h,'Создать резервный код').click();
+  const output=recoveryControl(h,issuedRecovery),copy=recoveryControl(h,'Скопировать код');
+  assert.ok(output);
+  recoveryField(h).value=recoveryPassword;
+  const field=recoveryField(h);
+  h.ctx.document.hidden=true;await h.fire('visibilitychange');
+  assert.equal(output.textContent,'');assert.equal(field.value,'');
+  await copy.click();assert.deepEqual(h.clipboard,[]);
+  h.ctx.document.hidden=false;await h.fire('visibilitychange');
+  await new Promise(done=>setImmediate(done));
+  assert.equal(recoveryControl(h,issuedRecovery),undefined);
+  assert.ok(recoveryControl(h,'Заменить резервный код'));
+});
+
+test('administrator recovery requires internet, clears both credentials and returns to signed-out login',async()=>{
+  const h=appHarness();
+  h.controls.recoveryCode=issuedRecovery;
+  h.run("authMode='reset';originalRender()");
+  assert.match(h.element('app').innerHTML,/Резервный код администратора/);
+  h.element('adminRecoveryBtn').click();h.run('originalRender()');
+  assert.match(h.element('app').innerHTML,/id="loginEmail"/);
+  assert.match(h.element('app').innerHTML,/id="loginInvite" type="password"/);
+  const email=h.element('loginEmail'),password=h.element('loginPassword'),code=h.element('loginInvite');
+  const submit=()=>h.element('loginForm').onsubmit({preventDefault(){}});
+  await h.fire('offline');
+  email.value='other@example.test';password.value='new-password-value';code.value=issuedRecovery;
+  await submit();
+  assert.equal(password.value,'');assert.equal(code.value,'');
+  assert.equal(h.calls.length,0);
+  await h.fire('online');
+  password.value='new-password-value';code.value=issuedRecovery;
+  const wrong=submit();
+  assert.equal(password.value,'');assert.equal(code.value,'');
+  await wrong;
+  assert.match(h.element('loginStatus').textContent,/Резервный код недействителен или уже использован/);
+  email.value='admin@example.test';password.value='new-password-value';code.value=issuedRecovery;
+  await submit();h.run('originalRender()');
+  assert.equal(h.run('activeUser'),null);
+  assert.equal(h.run('authMode'),'login');
+  assert.match(h.element('loginStatus').textContent,/Пароль обновлён/);
+  assert.deepEqual(h.calls.map(call=>call.path),['/auth/recovery','/auth/recovery']);
+});
+
+test('the employee recovery form continues to submit its original payload',async()=>{
+  const h=appHarness();
+  h.run("authMode='reset';originalRender()");
+  assert.doesNotMatch(h.element('app').innerHTML,/id="loginEmail"/);
+  h.element('loginPassword').value='new-password-value';
+  h.element('loginInvite').value=resetCode.code;
+  await h.element('loginForm').onsubmit({preventDefault(){}});
+  assert.equal(h.run('authMode'),'login');
+  assert.deepEqual(h.calls,[{path:'/auth/reset',uid:undefined,method:'POST',body:{code:resetCode.code,newPassword:'new-password-value'}}]);
+});
 
 test('employee reset code names its recipient and cannot follow navigation or be copied after leaving',async()=>{
   const h=await resetHarness();

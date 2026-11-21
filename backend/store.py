@@ -53,6 +53,13 @@ class Reset:
 
 
 @dataclass(frozen=True)
+class Recovery:
+    uid: str
+    digest: str
+    generation: int
+
+
+@dataclass(frozen=True)
 class RateBin:
     rate_key: str
     attempts: tuple[int, ...]
@@ -93,7 +100,7 @@ BACKUP_TABLES = {
     "mutations": (Mutation, ("uid", "mutation_id")),
     "audit_events": (AuditEvent, ("id",)),
 }
-_RESTORE_ONLY_TABLES = ("account_emails", "sessions", "session_access", "session_refresh", "reset_tokens", "rate_bins")
+_RESTORE_ONLY_TABLES = ("account_emails", "sessions", "session_access", "session_refresh", "reset_tokens", "rate_bins", "admin_recovery")
 
 
 class DuplicateAccountEmail(Exception):
@@ -115,6 +122,7 @@ class Transaction(Protocol):
     def insert_account(self, account: Account) -> None: ...
     def update_account_security(self, account: Account) -> None: ...
     def promote_account(self, uid: str, session_generation: int) -> None: ...
+    def disable_account(self, uid: str, session_generation: int) -> None: ...
 
     def get_invitation(self, digest: str) -> Invitation | None: ...
     def get_invitation_by_id(self, invitation_id: str) -> Invitation | None: ...
@@ -131,6 +139,10 @@ class Transaction(Protocol):
     def get_reset(self, digest: str) -> Reset | None: ...
     def insert_reset(self, reset: Reset) -> None: ...
     def mark_reset_used(self, digest: str) -> None: ...
+
+    def get_recovery(self, uid: str) -> Recovery | None: ...
+    def put_recovery(self, recovery: Recovery) -> None: ...
+    def delete_recovery(self, uid: str) -> None: ...
 
     def get_rate_bin(self, key: str) -> RateBin | None: ...
     def put_rate_bin(self, rate_bin: RateBin) -> None: ...
@@ -336,6 +348,13 @@ class _YdbTransaction:
             UPDATE accounts SET role = $role, session_generation = $session_generation WHERE uid = $uid;
         """, uid=uid, session_generation=session_generation, role="admin")
 
+    def disable_account(self, uid, session_generation):
+        self._rows("""
+            DECLARE $uid AS Utf8;
+            DECLARE $session_generation AS Uint64;
+            UPDATE accounts SET enabled = false, session_generation = $session_generation WHERE uid = $uid;
+        """, uid=uid, session_generation=session_generation)
+
     def get_invitation(self, digest):
         return self._one(Invitation, """
             DECLARE $digest AS Utf8;
@@ -461,6 +480,26 @@ class _YdbTransaction:
             DECLARE $digest AS Utf8;
             UPDATE reset_tokens SET used = true WHERE digest = $digest;
         """, digest=digest)
+
+    def get_recovery(self, uid):
+        return self._one(Recovery, """
+            DECLARE $uid AS Utf8;
+            SELECT * FROM admin_recovery WHERE uid = $uid;
+        """, uid=uid)
+
+    def put_recovery(self, recovery):
+        self._rows("""
+            DECLARE $uid AS Utf8;
+            DECLARE $digest AS Utf8;
+            DECLARE $generation AS Uint64;
+            UPSERT INTO admin_recovery (uid, digest, generation) VALUES ($uid, $digest, $generation);
+        """, **asdict(recovery))
+
+    def delete_recovery(self, uid):
+        self._rows("""
+            DECLARE $uid AS Utf8;
+            DELETE FROM admin_recovery WHERE uid = $uid;
+        """, uid=uid)
 
     def get_rate_bin(self, key):
         rows = self._rows("""

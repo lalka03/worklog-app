@@ -85,6 +85,64 @@ class BackupTest(unittest.TestCase):
                 action()
             self.assertEqual(error.exception.code, code)
 
+    def test_recovery_credential_is_never_backed_up_or_restored(self):
+        code = self.service.issue_recovery(self.owner, PASSWORD)["code"]
+        manifest = self.export()
+        combined = b"".join(self.objects.objects.values())
+        self.assertNotIn(b"admin_recovery\"", combined)
+        self.assertNotIn(code.encode(), combined)
+        self.assertNotIn(digest(code).encode(), combined)
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["counts"], {
+            "accounts": 1, "invitations": 0, "worklogs": 0, "mutations": 0, "audit_events": 1,
+        })
+        backup.restore_snapshot(self.target, self.objects, manifest, confirm_isolated=True)
+        restored = Service(self.target, clock=NOW.timestamp)
+        auth = restored.login(self.owner.email, PASSWORD, "192.0.2.2")
+        self.assertEqual(restored.recovery_status(restored.authenticate(auth["accessToken"])), {"active": False})
+        with self.assertRaises(DomainError) as error:
+            restored.redeem_recovery(self.owner.email, code, "another synthetic password")
+        self.assertEqual((error.exception.code, error.exception.status), ("invalid_recovery", 422))
+
+    def test_restore_rejects_recovery_rows_even_with_a_valid_checksum(self):
+        manifest = self.export()
+        key = manifest["data_key"]
+        self.objects.objects[key] += (
+            json.dumps(["admin_recovery", {"uid": "owner", "digest": "a" * 64, "generation": 0}]).encode() + b"\n"
+        )
+        manifest["sha256"] = hashlib.sha256(self.objects.objects[key]).hexdigest()
+        with self.assertRaisesRegex(backup.BackupError, "invalid snapshot contents"):
+            backup.restore_snapshot(self.target, self.objects, manifest, confirm_isolated=True)
+        self.assertTrue(all(not rows for rows in self.target.records.values()))
+
+    def test_restore_refuses_a_target_with_only_recovery_credentials(self):
+        self.service.issue_recovery(self.owner, PASSWORD)
+        row = self.source.run_read(lambda tx: tx.get_recovery(self.owner.uid))
+        self.target.run_write(lambda tx: tx.put_recovery(row))
+        with self.assertRaisesRegex(backup.BackupError, "restore target must be empty"):
+            backup.restore_snapshot(self.target, self.objects, self.export(), confirm_isolated=True)
+        self.assertFalse(self.target.records["accounts"])
+        self.assertEqual(self.target.run_read(lambda tx: tx.get_recovery(self.owner.uid)), row)
+
+    def test_restore_accepts_pre_recovery_schema_version_one(self):
+        prefix = "yandex-test/2026-11-20/" + "a" * 32
+        key = f"{prefix}/snapshot.jsonl"
+        self.objects.objects[key] = (
+            b'["accounts",{"uid":"legacy","email":"legacy@example.test",'
+            b'"password_hash":"$argon2id$fixture","role":"admin","enabled":true,'
+            b'"created_at":1700000000,"session_generation":7}]\n'
+        )
+        manifest = {
+            "schema_version": 1, "created_at": "2026-11-20T10:15:00Z", "source_database": None,
+            "data_key": key, "manifest_key": f"{prefix}/manifest.json",
+            "sha256": hashlib.sha256(self.objects.objects[key]).hexdigest(),
+            "counts": {"accounts": 1, "invitations": 0, "worklogs": 0, "mutations": 0, "audit_events": 0},
+        }
+        backup.restore_snapshot(self.target, self.objects, manifest, confirm_isolated=True)
+        account = self.target.run_read(lambda tx: tx.get_account_by_email("legacy@example.test"))
+        self.assertEqual((account.uid, account.role, account.session_generation), ("legacy", "admin", 7))
+        self.assertIsNone(self.target.run_read(lambda tx: tx.get_recovery(account.uid)))
+
     def test_restore_requires_isolated_target(self):
         manifest = self.export()
         with self.assertRaises(backup.BackupError):

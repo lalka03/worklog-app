@@ -1,13 +1,16 @@
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
 from threading import Barrier, Event
+from unittest.mock import patch
 
+from backend import security
 from backend.security import new_token
 from backend.service import DomainError, Service, promote_owner, seed_owner_invite
 from backend.store import Account
 from fake_store import FakeStore, seed_test_session
+from test_worklog import snapshot
 
 
 PASSWORD = "sample password 123"
@@ -33,6 +36,15 @@ class AuthTest(unittest.TestCase):
     def register_employee(self, email="employee@example.test", password=PASSWORD):
         code = self.service.create_invite(self.owner)["code"]
         return self.service.register(email, password, code)
+
+    def login_owner(self):
+        account = self.store.run_read(lambda tx: tx.get_account(ADMIN_UID))
+        if account.password_hash == "unused-by-fixture":
+            self.store.run_write(lambda tx: tx.update_account_security(
+                replace(account, password_hash=security.hash_password(PASSWORD))
+            ))
+        auth = self.service.login(account.email, PASSWORD, "192.0.2.1", remember=True)
+        return auth, self.service.authenticate(auth["accessToken"])
 
     def test_remembered_login_has_fixed_thirty_day_expiry(self):
         self.register_employee()
@@ -167,6 +179,187 @@ class AuthTest(unittest.TestCase):
         self.now += 60 * 60
         self.assert_error("invalid_reset", 422, self.service.redeem_reset, reset["code"], NEW_PASSWORD)
         self.service.login("employee@example.test", PASSWORD, "192.0.2.1")
+
+    def test_admin_recovery_lifecycle(self):
+        _, owner = self.login_owner()
+        self.service.put_worklog(owner, snapshot(), 0, "owner-worklog")
+        self.assertEqual(self.service.recovery_status(owner), {"active": False})
+        first = self.service.issue_recovery(owner, PASSWORD)["code"]
+        stored = self.store.run_read(lambda tx: tx.get_recovery(owner.uid))
+        self.assertEqual(asdict(stored), {"uid": owner.uid, "digest": security.digest(first), "generation": 0})
+        self.assertEqual(self.service.recovery_status(owner), {"active": True})
+        self.now += 365 * 24 * 60 * 60
+        self.assert_error("invalid_session", 401, self.service.recovery_status, owner)
+        auth, owner = self.login_owner()
+        another, _ = self.login_owner()
+        self.assertEqual(self.service.recovery_status(owner), {"active": True})
+        second = self.service.issue_recovery(owner, PASSWORD)["code"]
+        self.assertNotEqual(first, second)
+        self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, owner.email, first, NEW_PASSWORD)
+        self.service.redeem_recovery(" OWNER@Example.TEST ", second, NEW_PASSWORD)
+        for session in (auth, another):
+            self.assert_error("invalid_session", 401, self.service.authenticate, session["accessToken"])
+            self.assert_error("invalid_session", 401, self.service.renew, session["refreshToken"])
+        for used in (second, second):
+            self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, owner.email, used, PASSWORD)
+        self.assert_error("invalid_credentials", 401, self.service.login, owner.email, PASSWORD, "192.0.2.1")
+        recovered = self.service.login(owner.email, NEW_PASSWORD, "192.0.2.1")
+        principal = self.service.authenticate(recovered["accessToken"])
+        self.assertEqual(recovered["user"], auth["user"])
+        self.assertEqual(self.service.get_worklog(principal), {"data": snapshot(), "revision": 1})
+        self.assertEqual(self.service.recovery_status(principal), {"active": False})
+        self.assertIsNone(self.store.run_read(lambda tx: tx.get_recovery(principal.uid)))
+        self.assertEqual(self.store.run_read(lambda tx: tx.get_account(principal.uid)).session_generation, 1)
+        audit = list(self.store.records["audit_events"].values())
+        self.assertEqual([event.action for event in audit], [
+            "worklog_updated", "admin_recovery_issued", "admin_recovery_issued", "admin_recovery_redeemed",
+        ])
+        for secret in (first, second, PASSWORD, NEW_PASSWORD, security.digest(first), security.digest(second)):
+            self.assertNotIn(secret, repr(audit))
+
+    def test_recovery_revocation_requires_current_password(self):
+        _, owner = self.login_owner()
+        self.assert_error("invalid_current_password", 422, self.service.issue_recovery, owner, NEW_PASSWORD)
+        self.assertEqual(self.service.recovery_status(owner), {"active": False})
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        self.assert_error("invalid_current_password", 422, self.service.revoke_recovery, owner, NEW_PASSWORD)
+        self.assertEqual(self.service.recovery_status(owner), {"active": True})
+        self.service.revoke_recovery(owner, PASSWORD)
+        self.service.revoke_recovery(owner, PASSWORD)
+        self.assertEqual(self.service.recovery_status(owner), {"active": False})
+        self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, owner.email, code, NEW_PASSWORD)
+        audit = list(self.store.records["audit_events"].values())
+        self.assertEqual([event.action for event in audit], ["admin_recovery_issued", "admin_recovery_revoked"])
+        self.assertNotIn(code, repr(audit))
+
+    def test_recovery_denies_employees_even_with_a_stored_credential(self):
+        auth = self.register_employee()
+        employee = self.service.authenticate(auth["accessToken"])
+        for fn, args in ((self.service.recovery_status, ()),
+                         (self.service.issue_recovery, (PASSWORD,)),
+                         (self.service.revoke_recovery, (PASSWORD,))):
+            self.assert_error("forbidden", 403, fn, replace(employee, role="admin"), *args)
+        _, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        existing = self.store.run_read(lambda tx: tx.get_recovery(owner.uid))
+        self.store.run_write(lambda tx: tx.put_recovery(replace(existing, uid=employee.uid)))
+        self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, employee.email, code, NEW_PASSWORD)
+        self.assertEqual(self.service.recovery_status(owner), {"active": True})
+
+    def test_recovery_rejects_invalid_input_without_consuming_code(self):
+        _, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        for email, candidate, password in (
+            ("malformed address", code, NEW_PASSWORD),
+            ("unknown@example.test", code, NEW_PASSWORD),
+            (owner.email, "?", NEW_PASSWORD),
+            (owner.email, new_token(), NEW_PASSWORD),
+            (owner.email, code, "short"),
+            (owner.email, code, 20),
+            (owner.email, code, "a" * 129),
+            (owner.email, code, "unpaired surrogate \ud800"),
+        ):
+            self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, email, candidate, password)
+        self.service.redeem_recovery(owner.email, code, NEW_PASSWORD)
+
+    def test_recovery_lookup_checks_credentials_for_unknown_and_employee_email(self):
+        from fake_store import FakeTransaction
+
+        staff = self.register_employee()
+        _, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        lookups = []
+        lookup = FakeTransaction.get_recovery
+
+        def track(tx, uid):
+            lookups.append(uid)
+            return lookup(tx, uid)
+
+        with patch.object(FakeTransaction, "get_recovery", track):
+            for email in ("unknown@example.test", staff["user"]["email"], owner.email):
+                self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, email, new_token(), NEW_PASSWORD)
+        self.assertEqual(len(lookups), 3)
+        self.assertEqual(lookups[1:], [staff["user"]["uid"], owner.uid])
+        self.service.redeem_recovery(owner.email, code, NEW_PASSWORD)
+
+    def test_disabled_admin_cannot_manage_or_redeem_recovery(self):
+        _, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        account = self.store.records["accounts"][owner.uid]
+        self.store.records["accounts"][owner.uid] = replace(account, enabled=False)
+        self.assert_error("invalid_session", 401, self.service.recovery_status, owner)
+        self.assert_error("invalid_session", 401, self.service.issue_recovery, owner, PASSWORD)
+        self.assert_error("invalid_session", 401, self.service.revoke_recovery, owner, PASSWORD)
+        self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, owner.email, code, NEW_PASSWORD)
+
+    def test_operator_disable_permanently_invalidates_recovery_and_sessions(self):
+        from backend.service import disable_account
+
+        auth, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        disable_account(self.store, owner.uid)
+        self.assertIsNone(self.store.run_read(lambda tx: tx.get_recovery(owner.uid)))
+        account = self.store.records["accounts"][owner.uid]
+        self.assertFalse(account.enabled)
+        self.assertEqual(account.session_generation, 1)
+        self.store.records["accounts"][owner.uid] = replace(account, enabled=True)
+        self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, owner.email, code, NEW_PASSWORD)
+        self.assert_error("invalid_session", 401, self.service.renew, auth["refreshToken"])
+        fresh = self.service.login(owner.email, PASSWORD, "192.0.2.1")
+        self.assertEqual(self.service.recovery_status(self.service.authenticate(fresh["accessToken"])), {"active": False})
+
+    def test_password_reset_invalidates_recovery_and_stale_principal(self):
+        _, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        reset = self.service.issue_reset(owner, owner.uid)
+        self.service.redeem_reset(reset["code"], NEW_PASSWORD)
+        self.assert_error("invalid_recovery", 422, self.service.redeem_recovery, owner.email, code, PASSWORD)
+        self.assert_error("invalid_session", 401, self.service.issue_recovery, owner, NEW_PASSWORD)
+        auth = self.service.login(owner.email, NEW_PASSWORD, "192.0.2.1")
+        self.assertEqual(self.service.recovery_status(self.service.authenticate(auth["accessToken"])), {"active": False})
+
+    def test_recovery_issuance_rechecks_password_hash_after_confirmation(self):
+        _, owner = self.login_owner()
+        new_hash = security.hash_password(NEW_PASSWORD)
+        verify = security.verify_password
+
+        def verify_then_change(encoded, password):
+            verified = verify(encoded, password)
+            self.store.run_write(lambda tx: tx.update_account_security(
+                replace(tx.get_account(owner.uid), password_hash=new_hash)
+            ))
+            return verified
+
+        with patch.object(security, "verify_password", side_effect=verify_then_change):
+            self.assert_error("invalid_current_password", 422, self.service.issue_recovery, owner, PASSWORD)
+        self.assertEqual(self.service.recovery_status(owner), {"active": False})
+
+    def test_parallel_recovery_consumes_code_only_once(self):
+        _, owner = self.login_owner()
+        code = self.service.issue_recovery(owner, PASSWORD)["code"]
+        ready = Barrier(2)
+        password_hashes = {password: security.hash_password(password) for password in (PASSWORD, NEW_PASSWORD)}
+
+        def hash_after_both_checks(password):
+            ready.wait(timeout=5)
+            return password_hashes[password]
+
+        def attempt(password):
+            try:
+                self.service.redeem_recovery(owner.email, code, password)
+            except DomainError as error:
+                self.assertEqual((error.code, error.status), ("invalid_recovery", 422))
+                return None
+            return password
+
+        with patch.object(security, "hash_password", side_effect=hash_after_both_checks):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(attempt, (PASSWORD, NEW_PASSWORD)))
+        self.assertEqual(results.count(None), 1)
+        winning_password = next(item for item in results if item is not None)
+        self.service.login(owner.email, winning_password, "192.0.2.1")
+        account = self.store.run_read(lambda tx: tx.get_account(owner.uid))
+        self.assertEqual(account.session_generation, 1)
 
     def test_renewal_rotation(self):
         auth = self.register_employee()

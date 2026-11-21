@@ -72,6 +72,14 @@ CREATE TABLE rate_bins (
     PRIMARY KEY (rate_key)
 ) WITH (TTL = Interval("PT0S") ON expires_at AS SECONDS);
 
+-- Emergency recovery codes are excluded from logical backups.
+CREATE TABLE admin_recovery (
+    uid Utf8 NOT NULL,
+    digest Utf8 NOT NULL,
+    generation Uint64 NOT NULL,
+    PRIMARY KEY (uid)
+);
+
 CREATE TABLE worklogs (
     uid Utf8 NOT NULL,
     data_json Utf8 NOT NULL,

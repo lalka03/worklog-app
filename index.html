@@ -188,6 +188,8 @@ let accountError='', authMode='login', adminData=null, session=0;
 let sync=null, syncState=null, syncTimer=null, syncDelay=2000;
 let adminEpoch=0, connectivityEpoch=0, disconnected=false;
 let invites=[], inviteBusy=false, inviteError='', adminSecret=null, cancelConfirm=null;
+let recoveryEpoch=0, recoveryActive=null, recoveryBusy=false, recoveryError='', recoverySecret=null;
+let recoveryCard=null, recoveryOutput=null, recoveryPasswordField=null;
 let DB=normalizeRemote();
 const nativeSession=(()=>{
   const capacitor=window.Capacitor;
@@ -230,6 +232,7 @@ function saveDB(data=DB){
 }
 function clearAccount(){
   session++; adminEpoch++; disconnected=false;
+  clearRecovery();
   clearTimeout(syncTimer);
   sync?.close();
   sync=null; syncState=null; syncDelay=2000;
@@ -336,6 +339,7 @@ async function runSync(current){
     }
     if(!user || user.uid!==scope.uid){clearAccount();render();return;}
     activeUser=user;disconnected=false;isAdmin=user.role==='admin';updateEmployeeTab();
+    if(state.tab==='settings' && adminAvailable()) renderRecoveryCard();
   }
   if(!syncState.pending && (!syncState.conflict || syncState.conflict.resolved) && !canRefreshPersonal()){
     renderSyncStatus();scheduleSync(60000);return;
@@ -400,12 +404,19 @@ async function recoverSync(choice){
 window.addEventListener('online',()=>{renderSyncStatus();scheduleSync(0);});
 window.addEventListener('offline',disconnect);
 document.addEventListener('visibilitychange',async()=>{
+  if(document.hidden){
+    clearRecovery();
+    if(authMode==='admin-recovery'){
+      const code=document.getElementById('loginInvite'),password=document.getElementById('loginPassword');
+      if(code) code.value='';if(password) password.value='';
+    }
+  }
   const current=session;
   if(!personalValid()) return;
   if(api.isOffline() && !await api.checkpointOffline()) return;
   if(current!==session) return;
   if(document.hidden) clearTimeout(syncTimer);
-  else scheduleSync(0);
+  else {if(recoveryVisible()) renderRecoveryCard();scheduleSync(0);}
 });
 
 const clone = o => JSON.parse(JSON.stringify(o));
@@ -565,6 +576,7 @@ function confirmModal(title, text, okLabel='ОК'){
 }
 function setTab(t){
   if(t==='employees' && (!adminAvailable() || accountError)) return;
+  if(t!=='settings' || state.tab!=='settings') clearRecovery();
   if(t!=='employees'){
     adminSecret=null;
     if(state.tab==='employees') employeeView={...employeeView};
@@ -583,15 +595,17 @@ document.getElementById('btnAddToday').onclick = () => {
   render();
 };
 function renderLogin(app){
-  const registering=authMode==='register', resetting=authMode==='reset';
+  const registering=authMode==='register', administratorRecovery=authMode==='admin-recovery';
+  const resetting=authMode==='reset' || administratorRecovery;
   app.innerHTML=`<div class="card"><h2>${registering?'Регистрация':resetting?'Восстановление пароля':'Вход в Worklog Yandex Test'}</h2>
-  ${resetting?'<p class="muted">Введите одноразовый код, полученный от администратора.</p>':''}
+  ${administratorRecovery?'<p class="muted">Введите свою электронную почту и сохранённый резервный код администратора.</p>':resetting?'<p class="muted">Введите одноразовый код, полученный от администратора.</p>':''}
   <form id="loginForm">
-  ${resetting?'':'<div class="input-group"><input id="loginEmail" type="email" autocomplete="username" placeholder=" " required maxlength="254"><label for="loginEmail">Электронная почта</label></div>'}
+  ${resetting && !administratorRecovery?'':'<div class="input-group"><input id="loginEmail" type="email" autocomplete="username" placeholder=" " required maxlength="254"><label for="loginEmail">Электронная почта</label></div>'}
   <div class="input-group"><input id="loginPassword" type="password" autocomplete="${authMode==='login'?'current-password':'new-password'}" placeholder=" " required minlength="12" maxlength="128"><label for="loginPassword">${resetting?'Новый пароль':'Пароль'}</label></div>
-  ${registering || resetting?`<div class="input-group"><input id="loginInvite" type="text" autocapitalize="off" spellcheck="false" autocomplete="off" placeholder=" " maxlength="128" required><label for="loginInvite">${registering?'Код приглашения':'Код восстановления'}</label></div>`:''}
+  ${registering || resetting?`<div class="input-group"><input id="loginInvite" type="${administratorRecovery?'password':'text'}" autocapitalize="off" spellcheck="false" autocomplete="off" placeholder=" " maxlength="128" required><label for="loginInvite">${registering?'Код приглашения':'Код восстановления'}</label></div>`:''}
   ${!registering && !resetting && nativeSession?'<label class="checkbox-row"><input id="loginRemember" type="checkbox"><span>Запомнить меня на 30 дней</span></label>':''}
   <div style="display:grid;gap:10px"><button class="btn primary" type="submit">${registering?'Зарегистрироваться':resetting?'Установить пароль':'Войти'}</button>
+  ${authMode==='reset'?'<button class="btn ghost" type="button" id="adminRecoveryBtn">Резервный код администратора</button>':''}
   ${authMode==='login'?'<button class="btn ghost" type="button" id="registerBtn">Зарегистрироваться</button><button class="btn" type="button" id="resetBtn">Забыл пароль</button>':'<button class="btn ghost" type="button" id="loginBack">Ко входу</button>'}</div></form>
   <p class="muted" id="loginStatus" role="status"></p></div>`;
   const form=document.getElementById('loginForm'), status=document.getElementById('loginStatus');
@@ -601,11 +615,12 @@ function renderLogin(app){
     document.getElementById('registerBtn').onclick=()=>setMode('register');
     document.getElementById('resetBtn').onclick=()=>setMode('reset');
   } else document.getElementById('loginBack').onclick=()=>setMode('login');
+  if(authMode==='reset') document.getElementById('adminRecoveryBtn').onclick=()=>setMode('admin-recovery');
   let submitting=false;
   form.onsubmit=async event=>{
     event.preventDefault();
     if(submitting) return;
-    const email=resetting?null:document.getElementById('loginEmail');
+    const email=resetting && !administratorRecovery?null:document.getElementById('loginEmail');
     const password=document.getElementById('loginPassword');
     const code=registering || resetting?document.getElementById('loginInvite'):null;
     if((email && !email.reportValidity()) || !password.reportValidity() || (code && (!code.reportValidity() || !code.value.trim()))) return;
@@ -616,7 +631,12 @@ function renderLogin(app){
     status.textContent='Подключение…';
     try {
       if(resetting){
-        await api.reset(code.value.trim(),password.value);
+        if(administratorRecovery){
+          const credential=code.value.trim(), replacement=password.value, address=email.value.trim();
+          code.value='';password.value='';
+          if(navigator.onLine===false){status.textContent='Для восстановления подключитесь к интернету.';return;}
+          await api.redeemRecovery(address,credential,replacement);
+        } else await api.reset(code.value.trim(),password.value);
         if(current!==session) return;
         authMode='login'; accountError='Пароль обновлён. Войдите с новым паролем.'; render();
       } else {
@@ -629,6 +649,7 @@ function renderLogin(app){
       const messages={unconfigured:'Сервер приложения не настроен.',network:'Нет связи с сервером.',timeout:'Сервер не ответил. Повторите попытку.',
         invalid_credentials:'Проверьте электронную почту и пароль.',invalid_invite:'Приглашение недействительно или уже использовано.',
         invalid_reset:'Код восстановления недействителен или уже использован.',invalid_email:'Проверьте адрес электронной почты.',
+        invalid_recovery:'Резервный код недействителен или уже использован.',
         invalid_password:'Пароль должен содержать от 12 до 128 символов.',rate_limited:'Слишком много попыток. Повторите позже.',
         secure_storage:'Не удалось сохранить защищённый сеанс. Попробуйте войти без галочки.'};
       status.textContent=messages[e.code]||'Не удалось выполнить запрос. Проверьте данные и повторите попытку.';
@@ -685,10 +706,93 @@ function updateEmployeeTab(){
 }
 function closeAdmin(){
   adminEpoch++; employeesLoading=false; employeesError=''; inviteBusy=false;
+  clearRecovery();
   adminData=null; employeeView=newEmployeeView(); isAdmin=false;
   invites=[]; adminSecret=null; inviteError='';
   if(state.tab==='employees'){cancelConfirm?.();state.tab='home';render();if(!disconnected) toast('Доступ к сотрудникам отозван');}
   else updateEmployeeTab();
+}
+function removeRecoveryCard(){
+  if(recoveryOutput) recoveryOutput.textContent='';
+  if(recoveryPasswordField) recoveryPasswordField.value='';
+  recoveryCard?.remove();
+  recoveryCard=null;recoveryOutput=null;recoveryPasswordField=null;
+}
+function clearRecovery(){
+  recoveryEpoch++;recoveryActive=null;recoveryBusy=false;recoveryError='';recoverySecret=null;
+  removeRecoveryCard();
+}
+function recoveryVisible(){return !document.hidden && adminAvailable() && state.tab==='settings' && !accountError;}
+async function recoveryAction(action,password){
+  if(!recoveryVisible() || recoveryBusy) return;
+  const epoch=recoveryEpoch, current=()=>epoch===recoveryEpoch && recoveryVisible();
+  recoveryBusy=true;recoveryError='';
+  if(action!=='status') recoverySecret=null;
+  renderRecoveryCard();
+  try {
+    if(action==='status'){
+      const result=await api.recoveryStatus();
+      if(current()){
+        if(typeof result?.active!=='boolean') throw new Error('Invalid status');
+        recoveryActive=result.active;
+      }
+    } else if(action==='issue'){
+      const result=await api.issueRecovery(password);
+      if(current()){
+        if(typeof result?.code!=='string' || !/^[A-Za-z0-9_-]{22,128}$/.test(result.code)) throw new Error('Invalid code');
+        recoveryActive=true;recoverySecret=result.code;
+      }
+    } else {
+      await api.revokeRecovery(password);
+      if(current()) recoveryActive=false;
+    }
+  } catch(e){
+    if(!current()) return;
+    if(['network','timeout'].includes(e.code)) await disconnect();
+    else if(e.status===403) closeAdmin();
+    else recoveryError=e.code==='invalid_current_password'?'Неверный текущий пароль.':e.code==='rate_limited'?'Слишком много попыток. Повторите позже.':'Не удалось выполнить действие. Повторите попытку.';
+  } finally {
+    if(current()){recoveryBusy=false;renderRecoveryCard();}
+  }
+}
+function renderRecoveryCard(){
+  removeRecoveryCard();
+  if(!recoveryVisible()) return;
+  const epoch=recoveryEpoch, card=document.createElement('div');card.className='card';
+  recoveryCard=card;document.getElementById('app').appendChild(card);
+  const add=(tag,label)=>{const el=document.createElement(tag);el.textContent=label;card.appendChild(el);return el;};
+  const button=(label,callback)=>{const el=add('button',label);el.className='btn ghost';el.onclick=callback;return el;};
+  add('h2','Безопасность');
+  add('p','Резервный код администратора позволяет один раз восстановить пароль без письма.');
+  if(recoveryError) add('p',recoveryError).setAttribute('role','status');
+  if(recoveryBusy){add('p','Подключение…');return;}
+  if(recoveryActive===null){
+    if(recoveryError) button('Повторить',()=>recoveryAction('status'));
+    else void recoveryAction('status');
+    return;
+  }
+  add('p',recoveryActive?'Резервный код активен.':'Резервный код не создан.');
+  const password=add('input','');password.type='password';password.autocomplete='current-password';
+  password.placeholder='Текущий пароль';password.setAttribute('aria-label','Текущий пароль');
+  recoveryPasswordField=password;
+  const start=action=>{
+    if(card!==recoveryCard || epoch!==recoveryEpoch || !recoveryVisible()) return;
+    const value=password.value;password.value='';
+    return recoveryAction(action,value);
+  };
+  button(recoveryActive?'Заменить резервный код':'Создать резервный код',()=>start('issue'));
+  if(recoveryActive) button('Отозвать код',()=>start('revoke'));
+  if(recoverySecret){
+    add('p','Сохраните код отдельно, в безопасном месте. Он показан только сейчас.');
+    const output=add('p',recoverySecret);output.style.overflowWrap='anywhere';recoveryOutput=output;
+    const visible=()=>card===recoveryCard && epoch===recoveryEpoch && recoveryVisible() && recoverySecret!==null;
+    button('Скопировать код',async()=>{
+      if(!visible()) return;
+      try{await navigator.clipboard.writeText(recoverySecret);if(visible()) toast('Код скопирован');}
+      catch(e){if(visible()) toast('Не удалось скопировать. Сохраните код вручную.');}
+    });
+    button('Скрыть код',()=>{if(visible()){recoverySecret=null;renderRecoveryCard();}});
+  }
 }
 async function refreshEmployees(){
   if(!adminAvailable() || !scope || employeesLoading) return;
@@ -972,6 +1076,7 @@ function render(){
     hSub.textContent='Параметры и данные';
     app.innerHTML = renderSettings();
     bindSettings();
+    renderRecoveryCard();
     return;
   }
 }

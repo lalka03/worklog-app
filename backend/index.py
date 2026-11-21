@@ -21,11 +21,12 @@ _CORS_HEADERS = {name.lower() for name in _CORS_HEADER_NAMES}
 _BEARER = re.compile(r"Bearer +([A-Za-z0-9_-]{22,128})", re.IGNORECASE | re.ASCII)
 
 _ROUTES = (
-    (re.compile(r"/auth/(register|login|renew|logout|reset)"), {"POST"}),
+    (re.compile(r"/auth/(register|login|renew|logout|reset|recovery)"), {"POST"}),
     (re.compile(r"/me/worklog"), {"GET", "PUT"}),
     (re.compile(r"/admin/employees"), {"GET"}),
     (re.compile(r"/admin/employees/([A-Za-z0-9_-]{1,128})"), {"GET"}),
     (re.compile(r"/admin/invites"), {"GET", "POST"}),
+    (re.compile(r"/admin/recovery"), {"GET", "POST", "DELETE"}),
     (re.compile(r"/admin/invites/([A-Za-z0-9_-]{1,128})"), {"DELETE"}),
     (re.compile(r"/admin/users/([A-Za-z0-9_-]{1,128})/reset"), {"POST"}),
 )
@@ -34,6 +35,7 @@ _AUTH_FIELDS = {
     "login": {"email", "password"},
     "renew": {"refreshToken"},
     "reset": {"code", "newPassword"},
+    "recovery": {"email", "code", "newPassword"},
 }
 
 _service = None
@@ -186,6 +188,9 @@ def _public_auth(service, action, body, ip):
         return service.register(body["email"], body["password"], body["invite"])
     if action == "renew":
         return service.renew(body["refreshToken"])
+    if action == "recovery":
+        service.redeem_recovery(body["email"], body["code"], body["newPassword"])
+        return {}
     service.redeem_reset(body["code"], body["newPassword"])
     return {}
 
@@ -209,6 +214,16 @@ def _dispatch(event, method, path, argument, headers, ip, service):
         raise DomainError("forbidden", 403)
 
     cursor = _read_query(event, path)
+    if path == "/admin/recovery":
+        if method == "GET":
+            _read_body(event, headers, set())
+            return service.recovery_status(principal)
+        body = _read_body(event, headers, {"password"})
+        service.charge_auth_attempt(ip, scope="recovery_management", email=principal.email)
+        if method == "POST":
+            return service.issue_recovery(principal, body["password"])
+        service.revoke_recovery(principal, body["password"])
+        return {}
     if method == "PUT":  # /me/worklog is the only write route that accepts a snapshot.
         body = _read_body(event, headers, {"data", "expectedRevision", "mutationId"})
         return service.put_worklog(principal, body["data"], body["expectedRevision"], body["mutationId"])

@@ -2,17 +2,31 @@ import os
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from threading import Barrier
+from types import SimpleNamespace
 from uuid import uuid4
 
 from backend.security import hash_password
 from backend.service import DomainError, Service
+from backend import store as storage
 from backend.store import Account, YdbStore
 
 
 ENDPOINT = os.environ.get("WORKLOG_YDB_ENDPOINT")
 DATABASE = os.environ.get("WORKLOG_YDB_DATABASE")
 PASSWORD = "synthetic test password"
+
+
+class YdbTransactionTest(unittest.TestCase):
+    def test_target_with_only_recovery_records_is_not_empty(self):
+        class RawTransaction:
+            @contextmanager
+            def execute(self, query, parameters, settings):
+                rows = [{"present": 1}] if "FROM `admin_recovery`" in query else []
+                yield [SimpleNamespace(rows=rows)]
+
+        self.assertFalse(storage._YdbTransaction(RawTransaction(), None).backup_target_empty())
 
 
 @unittest.skipUnless(ENDPOINT and DATABASE, "requires an isolated YDB endpoint and database")
@@ -29,6 +43,50 @@ class YdbIntegrationTest(unittest.TestCase):
         ))
         auth = cls.service.login(email, PASSWORD, f"2001:db8::{uid[:4]}:{uid[4:8]}")
         cls.owner = cls.service.authenticate(auth["accessToken"])
+
+    def test_recovery_record_is_replaced_by_owner_uid(self):
+        uid, other_uid = str(uuid4()), str(uuid4())
+        first = storage.Recovery(uid, "a" * 64, 7)
+        replacement = storage.Recovery(uid, "b" * 64, 8)
+        other = storage.Recovery(other_uid, "a" * 64, 1)
+        self.addCleanup(self.store.run_write, lambda tx: (tx.delete_recovery(uid), tx.delete_recovery(other_uid)))
+        self.store.run_write(lambda tx: tx.put_recovery(first))
+        self.assertEqual(self.store.run_read(lambda tx: tx.get_recovery(uid)), first)
+        self.store.run_write(lambda tx: (tx.put_recovery(replacement), tx.put_recovery(other)))
+        self.assertEqual(self.store.run_read(lambda tx: tx.get_recovery(uid)), replacement)
+        self.store.run_write(lambda tx: tx.delete_recovery(uid))
+        self.assertIsNone(self.store.run_read(lambda tx: tx.get_recovery(uid)))
+        self.assertEqual(self.store.run_read(lambda tx: tx.get_recovery(other_uid)), other)
+
+    def test_parallel_recovery_has_one_winner_in_ydb(self):
+        uid = str(uuid4())
+        email = f"recovery-{uid}@example.test"
+        ip = f"2001:db8::{uid[:4]}:{uid[4:8]}"
+        self.store.run_write(lambda tx: tx.insert_account(
+            Account(uid, email, hash_password(PASSWORD), "admin", True, int(time.time()), 0)
+        ))
+        auth = self.service.login(email, PASSWORD, ip)
+        principal = self.service.authenticate(auth["accessToken"])
+        code = self.service.issue_recovery(principal, PASSWORD)["code"]
+        start = Barrier(2)
+        def attempt(password):
+            start.wait(timeout=5)
+            try:
+                self.service.redeem_recovery(email, code, password)
+            except DomainError as error:
+                self.assertEqual((error.code, error.status), ("invalid_recovery", 422))
+                return None
+            return password
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(attempt, ("synthetic new password 1", "synthetic new password 2")))
+        self.assertEqual(results.count(None), 1)
+        winner = next(result for result in results if result is not None)
+        self.assertEqual(self.service.login(email, winner, ip)["user"]["uid"], uid)
+        self.assertEqual(self.store.run_read(lambda tx: tx.get_account(uid)).session_generation, 1)
+        self.assertIsNone(self.store.run_read(lambda tx: tx.get_recovery(uid)))
+        with self.assertRaises(DomainError) as blocked:
+            self.service.renew(auth["refreshToken"])
+        self.assertEqual(blocked.exception.code, "invalid_session")
 
     def test_parallel_register_only_one_ydb_commit(self):
         invite = self.service.create_invite(self.owner)

@@ -35,6 +35,9 @@ paths:
   /auth/reset:
     post: *http_operation
     options: *http_operation
+  /auth/recovery:
+    post: *http_operation
+    options: *http_operation
   /me/worklog:
     get: *http_operation
     put: *http_operation
@@ -61,6 +64,11 @@ paths:
   /admin/invites:
     get: *http_operation
     post: *http_operation
+    options: *http_operation
+  /admin/recovery:
+    get: *http_operation
+    post: *http_operation
+    delete: *http_operation
     options: *http_operation
   /admin/invites/{id}:
     parameters:

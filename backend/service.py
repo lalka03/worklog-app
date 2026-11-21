@@ -1,5 +1,6 @@
 """Account, invitation and session rules shared by the Worklog backend."""
 
+import hmac
 import ipaddress
 import json
 import re
@@ -17,6 +18,7 @@ from .store import (
     Invitation,
     Mutation,
     RateBin,
+    Recovery,
     Reset,
     Session,
     Store,
@@ -317,6 +319,19 @@ def promote_owner(store: Store, uid: str, invite_id: str, clock: Callable[[], fl
     store.run_write(promote)
 
 
+def disable_account(store: Store, uid: str, clock: Callable[[], float] = time.time) -> None:
+    """Privileged operator only; never expose this function through the app gateway."""
+    def disable(tx):
+        account = tx.get_account(uid)
+        if account is None:
+            raise DomainError("not_found", 404)
+        tx.disable_account(uid, account.session_generation + 1)
+        tx.delete_recovery(uid)
+        _audit(tx, "account_disabled", "", uid, int(clock()))
+
+    store.run_write(disable)
+
+
 class Service:
     def __init__(
         self, store: Store, clock: Callable[[], float] = time.time, tokens: Callable[[], str] = security.new_token,
@@ -562,6 +577,76 @@ class Service:
             ))
             tx.mark_reset_used(digest)
             _audit(tx, "password_reset_redeemed", account.uid, account.uid, self._now())
+
+        self.store.run_write(redeem)
+
+    def recovery_status(self, principal: Principal) -> dict:
+        def status(tx):
+            account = self._require_admin(tx, principal)
+            record = tx.get_recovery(account.uid)
+            return {"active": record is not None and record.generation == account.session_generation}
+        return self.store.run_read(status)
+
+    def _confirm_recovery_password(self, principal, password):
+        account = self.store.run_read(lambda tx: self._require_admin(tx, principal))
+        if not security.valid_password(password) or not security.verify_password(account.password_hash, password):
+            raise DomainError("invalid_current_password", 422)
+        return account
+
+    def _recheck_recovery_confirmation(self, tx, principal, confirmed):
+        account = self._require_admin(tx, principal)
+        if (account.password_hash != confirmed.password_hash or
+                account.session_generation != confirmed.session_generation):
+            raise DomainError("invalid_current_password", 422)
+        return account
+
+    def issue_recovery(self, principal: Principal, password: str) -> dict:
+        confirmed = self._confirm_recovery_password(principal, password)
+        code = self.tokens()
+        digest = security.digest(code)
+
+        def issue(tx):
+            account = self._recheck_recovery_confirmation(tx, principal, confirmed)
+            tx.put_recovery(Recovery(account.uid, digest, account.session_generation))
+            _audit(tx, "admin_recovery_issued", account.uid, account.uid, self._now())
+            return {"code": code}
+
+        return self.store.run_write(issue)
+
+    def revoke_recovery(self, principal: Principal, password: str) -> None:
+        confirmed = self._confirm_recovery_password(principal, password)
+
+        def revoke(tx):
+            account = self._recheck_recovery_confirmation(tx, principal, confirmed)
+            if tx.get_recovery(account.uid) is not None:
+                tx.delete_recovery(account.uid)
+                _audit(tx, "admin_recovery_revoked", account.uid, account.uid, self._now())
+
+        self.store.run_write(revoke)
+
+    def _find_recovery(self, tx, email, digest):
+        account = tx.get_account_by_email(email)
+        record = tx.get_recovery(account.uid if account else "")
+        matched = hmac.compare_digest(record.digest if record else "0" * 64, digest)
+        if (account is None or not account.enabled or account.role != "admin" or
+                record is None or record.generation != account.session_generation or not matched):
+            raise DomainError("invalid_recovery", 422)
+        return account
+
+    def redeem_recovery(self, email: str, code: str, new_password: str) -> None:
+        normalized = security.normalize_email(email)
+        digest = security.credential_digest(code)
+        if normalized is None or digest is None or not security.valid_password(new_password):
+            raise DomainError("invalid_recovery", 422)
+        self.store.run_read(lambda tx: self._find_recovery(tx, normalized, digest))
+        encoded = security.hash_password(new_password)
+
+        def redeem(tx):
+            account = self._find_recovery(tx, normalized, digest)
+            tx.update_account_security(replace(account, password_hash=encoded,
+                                              session_generation=account.session_generation + 1))
+            tx.delete_recovery(account.uid)
+            _audit(tx, "admin_recovery_redeemed", account.uid, account.uid, self._now())
 
         self.store.run_write(redeem)
 

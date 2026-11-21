@@ -27,6 +27,7 @@ class FakeStore:
             name: {} for name in (
                 "accounts", "account_emails", "invitations", "sessions", "session_access",
                 "session_refresh", "reset_tokens", "rate_bins", "worklogs", "mutations", "audit_events",
+                "admin_recovery",
             )
         }
 
@@ -97,6 +98,10 @@ class FakeTransaction:
         account = self._records["accounts"][uid]
         self._records["accounts"][uid] = replace(account, role="admin", session_generation=session_generation)
 
+    def disable_account(self, uid, session_generation):
+        account = self._records["accounts"][uid]
+        self._records["accounts"][uid] = replace(account, enabled=False, session_generation=session_generation)
+
     def get_invitation(self, digest):
         return self._records["invitations"].get(digest)
 
@@ -146,6 +151,15 @@ class FakeTransaction:
 
     def mark_reset_used(self, digest):
         self._records["reset_tokens"][digest] = replace(self._records["reset_tokens"][digest], used=True)
+
+    def get_recovery(self, uid):
+        return self._records["admin_recovery"].get(uid)
+
+    def put_recovery(self, recovery):
+        self._records["admin_recovery"][recovery.uid] = recovery
+
+    def delete_recovery(self, uid):
+        self._records["admin_recovery"].pop(uid, None)
 
     def get_rate_bin(self, key):
         return self._records["rate_bins"].get(key)

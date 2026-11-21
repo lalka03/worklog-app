@@ -444,6 +444,7 @@
       restore, requiresOnlineIdentity:()=>remembered && needsOnlineRenewal && !savedRecord, isOffline:()=>offline, offlineValid, enterOffline, checkpointOffline, reconnect,
       register:(email,password,invite)=>authenticate('register',{email,password,invite}),
       reset:(code,newPassword)=>request('/auth/reset',{method:'POST',body:{code,newPassword}}),
+      redeemRecovery:(email,code,newPassword)=>request('/auth/recovery',{method:'POST',body:{email,code,newPassword}}),
       renew:async()=>{
         if(needsOnlineRenewal && !offline) return reconnect();
         const current=generation, epoch=protectedEpoch;
@@ -468,6 +469,9 @@
       employee:uid=>authorized('/admin/employees/'+encodeURIComponent(uid)),
       createInvite:()=>authorized('/admin/invites',{method:'POST'}),
       listInvites:()=>authorized('/admin/invites'),
+      recoveryStatus:()=>authorized('/admin/recovery'),
+      issueRecovery:password=>authorized('/admin/recovery',{method:'POST',body:{password}}),
+      revokeRecovery:password=>authorized('/admin/recovery',{method:'DELETE',body:{password}}),
       revokeInvite:id=>authorized('/admin/invites/'+encodeURIComponent(id),{method:'DELETE'}),
       issueReset:uid=>authorized('/admin/users/'+encodeURIComponent(uid)+'/reset',{method:'POST'})
     };
