@@ -58,7 +58,7 @@
     let stored=empty, error=null, closed=false, running=null, cacheUnsafe=false;
     try {
       const raw=storage.getItem(scope.cache);
-      if(raw){
+      if(raw!==null && raw!==undefined){
         try {stored=parseCache(raw);}
         catch(e){cacheUnsafe=true;error='cache_corrupt';}
       }
@@ -214,7 +214,7 @@
       let raw;
       try {raw=storage.getItem(scope.cache);}
       catch(e){setError('cache_unreadable');return false;}
-      if(!raw){setError('cache_unreadable');return false;}
+      if(raw===null || raw===undefined){setError('cache_unreadable');return false;}
       let recovered;
       try {recovered=parseCache(raw);}
       catch(e){setError('cache_corrupt');return false;}
