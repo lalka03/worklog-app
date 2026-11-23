@@ -33,7 +33,11 @@ test('Cache QA uses a distinct Android package and contains a fail-closed accoun
   assert.equal(qa.appName,'Worklog Cache QA');
   assert.notEqual(qa.appId,prod.appId);
   assert.notEqual(qa.appId,'com.worklog.app.yandex.offlineqa');
-  assert.match(fs.readFileSync('scripts/stage-cache-qa-assets.cjs','utf8'),/cache-qa-guard\.js/);
+  const stage=fs.readFileSync('scripts/stage-cache-qa-assets.cjs','utf8');
+  assert.match(stage,/CACHE_QA_OFFLINE_LAB_ASSETS_READY/);
+  assert.match(stage,/cache-qa-lab\.html/);
+  assert.match(stage,/CACHE_QA_UNEXPECTED_WEB_ASSETS/);
+  assert.doesNotMatch(stage,/stage-pilot-assets/);
   assert.match(fs.readFileSync('scripts/stage-cache-qa-android.cjs','utf8'),/CACHE_QA_NATIVE_IDENTITY_GUARD_STOP/);
 });
 
