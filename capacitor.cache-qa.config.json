@@ -1,0 +1,7 @@
+{
+  "appId": "com.worklog.app.yandex.cacheqa",
+  "appName": "Worklog Cache QA",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {"allowMixedContent": false}
+}
