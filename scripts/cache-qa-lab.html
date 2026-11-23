@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Worklog Cache QA — офлайн-тест</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,-apple-system,Roboto,sans-serif}
+body{margin:0;padding:26px 18px 45px;line-height:1.5;max-width:700px;margin-inline:auto}
+h1{font-size:1.4rem;margin-bottom:.2rem}
+p{margin-top:.8rem}
+small{opacity:.76}
+button{padding:13px 20px;font:inherit;font-weight:700;border:0;border-radius:12px;background:#315ed3;color:#fff;min-height:48px}
+button:disabled{opacity:.6}
+#results{padding:14px 16px;border-radius:12px;background:rgba(130,130,130,.1);margin-top:16px;white-space:pre-wrap;overflow-wrap:anywhere}
+#results[data-success="true"]{outline:2px solid #287a49}
+#results[data-success="false"]{outline:2px solid #a52b2b}
+.notice{padding:12px 14px;border-left:4px solid #777;background:rgba(130,130,130,.08)}
+</style>
+</head>
+<body>
+<h1>Worklog Cache QA</h1>
+<p><b>Лаборатория повреждённого кэша — только офлайн</b></p>
+<p class="notice">Здесь используются только временные синтетические данные в оперативной памяти. Приложение не просит логин и пароль, не подключается к Яндекс Облаку и не читает данные основного Worklog.</p>
+<p>Нажмите кнопку. Вы увидите результаты проверки повреждённого JSON, ошибки чтения, повреждённой очереди отправки и нехватки памяти.</p>
+<button id="run" type="button">Запустить 4 проверки</button>
+<div id="results" role="status" aria-live="polite">Ожидание запуска</div>
+<p><small>Если хотя бы один тест не пройдёт, запишите сообщение или сделайте снимок экрана. Не выполняйте очистку данных основного приложения №36.</small></p>
+<script src="account.js"></script>
+<script src="sync.js"></script>
+<script src="cache-qa-lab.js"></script>
+</body>
+</html>
