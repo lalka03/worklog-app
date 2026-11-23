@@ -1,0 +1,29 @@
+name: Worklog Reliability QA (tests only)
+
+on:
+  push:
+    branches: [worklog-reliability-qa-20261123]
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout isolated QA branch
+        uses: actions/checkout@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Backend isolated-memory tests
+        run: python -m unittest discover -s backend/tests -v
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Client offline/conflict tests
+        run: npm test
