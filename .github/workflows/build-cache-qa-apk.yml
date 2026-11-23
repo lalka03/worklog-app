@@ -1,0 +1,121 @@
+name: Worklog Cache QA APK (separate synthetic-only app)
+
+on:
+  push:
+    branches: [worklog-cache-qa-20261123]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worklog-cache-qa-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    if: github.ref == 'refs/heads/worklog-cache-qa-20261123'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install existing pinned backend packages
+        run: python -m pip install -r backend/requirements.txt
+      - name: Run backend tests with no YDB credentials
+        run: python -m unittest discover -s backend/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Run frontend, reliability and QA isolation tests
+        run: npm test
+
+  qa-apk:
+    if: github.ref == 'refs/heads/worklog-cache-qa-20261123'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Stage reviewed pilot assets with synthetic-only QA account guard
+        env:
+          WORKLOG_API_BASE_URL: ${{ vars.WORKLOG_API_BASE_URL }}
+        run: node scripts/stage-cache-qa-assets.cjs
+      - name: Verify staged guard exists before packaging
+        run: |
+          test -f www/cache-qa-guard.js
+          grep -F 'cache-qa-guard.js' www/index.html
+          grep -F 'worklog.cache.qa.20261123@example.com' www/cache-qa-guard.js
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-34 build-tools;34.0.0
+      - name: Install Capacitor dependencies
+        run: npm install
+      - name: Apply isolated app configuration
+        run: cp capacitor.cache-qa.config.json capacitor.config.json
+      - name: Generate isolated Android project
+        run: npx cap add android
+      - name: Install protected session bridge for separate QA package
+        run: node scripts/stage-cache-qa-android.cjs
+      - name: Configure existing release signing (no private material uploaded)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/worklog-release.p12
+          cat >> android/app/build.gradle <<'GRADLE'
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("KEYSTORE_FILE"))
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+              defaultConfig {
+                  versionCode Integer.valueOf(System.getenv("VERSION_CODE") ?: "1")
+              }
+          }
+          GRADLE
+      - name: Sync web files
+        run: npx cap sync android
+      - name: Build signed QA APK
+        env:
+          VERSION_CODE: ${{ github.run_number }}
+          KEYSTORE_FILE: ${{ github.workspace }}/android/app/worklog-release.p12
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease
+      - name: Verify package, label, signing and checksum
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          "$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK" | tee /tmp/worklog-qa-badging
+          grep -F "package: name='com.worklog.app.yandex.cacheqa'" /tmp/worklog-qa-badging
+          grep -F "application-label:'Worklog Cache QA'" /tmp/worklog-qa-badging
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "$APK" | tee /tmp/worklog-qa-signing
+          grep -iF '6ae87ad6e78679209f126ff3708a859bc52389fb90c4cc1b46ccbb5bfedd3ec6' /tmp/worklog-qa-signing
+          sha256sum "$APK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WorklogCacheQA-separate-release
+          path: android/app/build/outputs/apk/release/app-release.apk
+          retention-days: 7
+          if-no-files-found: error
