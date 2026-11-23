@@ -62,3 +62,50 @@ are separately confirmed. All errors stop; never "fix" cloud settings automatica
 **Implementation status:** tests for this preflight and its refusal paths are in
 `backend/tests/test_restore_target_config.py`. It has not been run against the
 owner's cloud and must not be interpreted as a deployed change.
+
+
+## November 2026 billing review without the browser (read-only CLI option)
+
+The 2026-09 Yandex Cloud CLI release 1.34.0 added `yc billing consumption-core`
+read-only usage reports. Source:
+https://yandex.cloud/en/docs/cli/release-notes
+and
+https://yandex.cloud/en/docs/cli/cli-ref/billing/cli-ref/consumption-core/get-billing-account-usage-report .
+
+Use **only an existing authorized Cloud Shell session**. Confirm `yc --version`
+supports the new command. If not, stop and inspect Billing in the Cloud Console;
+never install or upgrade CLI blindly in an operational shell.
+
+1. Owner selects the **exact billing-account ID**, which may differ from any folder,
+cloud or YDB database ID; do not guess it or paste it in a public repository.
+A billing viewer permission is required. If multiple billing accounts are
+available, identify the one actually attached to the Worklog cloud.
+2. Read the November report **across the whole billing account** to determine
+shared free-tier consumption. YDB RU allowances are not granted per folder
+or per DB. The CLI command is:
+   ```bash
+   yc billing consumption-core get-billing-account-usage-report \
+     --billing-account-id "$APPROVED_BILLING_ACCOUNT_ID" \
+     --start-date 2026-11-01T00:00:00Z \
+     --end-date 2026-11-23T23:59:59Z \
+     --aggregation-period month \
+     --format json
+   ```
+   This command **only reads a report**. Run it in the user's trusted console.
+   It may reveal details about all cloud services and spending; **do not paste
+   raw JSON, billing IDs, personal data, or secrets into the chat or GitHub**.
+3. Obtain YDB-only service/SKU figures using the Billing console or documented
+`yc billing metadata get-usage` to identify actual service/SKU IDs, then
+request a filtered report. Do not invent an YDB service ID. Record the YDB RU
+count, paid amount, currency, and GiB-month consumption only after **verifying
+the actual response fields**. A zero recorded expense does not prove 0 RU
+consumption or guarantee the next DB is free. Usage may be delayed and final
+charges can change after period close.
+4. Ask the owner to approve a **numeric maximum additional charge in the
+account currency**, not merely "cheap". Alerting is not hard spending control.
+Owner must separately authorize one exact temporary DB and its removal.
+Until then: `BILLING_NOT_VERIFIED`, `NO_TEMP_DB_CREATED`.
+
+This CLI alternative was reviewed only against public Yandex documentation,
+not executed on the owner's billing account or in Cloud Shell. No spending
+can be inferred from the available information.
