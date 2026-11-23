@@ -820,3 +820,29 @@ test('active token-only remembered account locks its draft until automatic onlin
   assert.equal(h.run('activeUser.uid'),alpha);
   assert.ok(h.records.get(alpha).data.days['2026-11-20']);
 });
+
+
+test('full local storage prevents a false save and server upload until space is available', async () => {
+  const h=appHarness();
+  await h.login('alpha');
+  const attempted={
+    date:'2026-11-23',
+    main:{hours:'3',route:1}
+  };
+  const initialDays=h.run('Object.keys(DB.days)');
+  const initialWrites=h.calls.filter(call=>call.method==='PUT').length;
+  const originalSet=h.ctx.localStorage.setItem;
+  h.ctx.localStorage.setItem=()=>{throw new Error('synthetic storage quota exceeded');};
+
+  assert.equal(h.run('saveDB({...DB,days:{...DB.days,"2026-11-23":{date:"2026-11-23",main:{hours:"3",route:1}}}})'),false);
+  assert.equal(h.run('sync.load().error'),'storage');
+  assert.deepEqual(h.run('Object.keys(DB.days)'),initialDays);
+  await h.run('sync.flush()');
+  assert.equal(h.calls.filter(call=>call.method==='PUT').length,initialWrites);
+
+  h.ctx.localStorage.setItem=originalSet;
+  assert.equal(h.run('saveDB({...DB,days:{...DB.days,"2026-11-23":{date:"2026-11-23",main:{hours:"3",route:1}}}})'),true);
+  await h.run('sync.flush()');
+  assert.equal(h.records.get(alpha).data.days['2026-11-23'].main.hours,attempted.main.hours);
+  assert.equal(h.run('sync.load().error'),null);
+});
