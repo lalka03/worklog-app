@@ -1496,6 +1496,10 @@ function bindSettings(){
 }
 async function exportBackup(worklog,button,prefix='worklog_backup_'){
   if(!personalValid() || !activeUser) return;
+  if(['cache_corrupt','cache_unreadable'].includes(syncState?.error)){
+    toast('Локальная копия недоступна. Не создавайте пустой экспорт и не очищайте данные приложения.');
+    return;
+  }
   const current=session;
   if(button.disabled) return;
   button.disabled = true;
