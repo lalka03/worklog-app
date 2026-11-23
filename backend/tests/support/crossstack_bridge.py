@@ -22,11 +22,14 @@ NOW = 1795430000
 EMAIL = "crossstack-employee@example.test"
 PASSWORD = "synthetic crossstack password"
 UID = str(UUID(int=20261123, version=4))
+SECOND_EMAIL = "crossstack-second@example.test"
+SECOND_UID = str(UUID(int=20261124, version=4))
 
 store = FakeStore()
 service = Service(store, clock=lambda: NOW)
-store.run_write(lambda tx: tx.insert_account(
-    Account(UID, EMAIL, hash_password(PASSWORD), "employee", True, NOW, 0)
+store.run_write(lambda tx: (
+    tx.insert_account(Account(UID, EMAIL, hash_password(PASSWORD), "employee", True, NOW, 0)),
+    tx.insert_account(Account(SECOND_UID, SECOND_EMAIL, hash_password(PASSWORD), "employee", True, NOW, 0)),
 ))
 
 
