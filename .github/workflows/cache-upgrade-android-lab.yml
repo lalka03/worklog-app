@@ -35,6 +35,8 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-34 build-tools;34.0.0
       - name: Build disposable old and candidate debug APKs, using pinned source
         shell: bash
         run: |
