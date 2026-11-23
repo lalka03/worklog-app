@@ -185,3 +185,83 @@ test('real backend deduplicates a persisted mutation after a lost HTTP response 
   assert.deepEqual(await d.api.getWorklog(),
     {data: snapshot(5), revision: 1});
 });
+
+
+const SECOND_EMAIL = 'crossstack-second@example.test';
+
+test('switching users preserves the first offline draft without showing or sending it as the second user', async t => {
+  const rpc = bridge(t);
+  const handset = device(rpc);
+  const first = await handset.api.login(EMAIL, PASSWORD);
+  const original = handset.sync(first.uid);
+  await original.refresh();
+  original.edit(snapshot(2));
+  await original.flush();
+  assert.equal(original.load().revision, 1);
+
+  handset.offline();
+  original.edit(snapshot(6));
+  assert.deepEqual(original.load().data, snapshot(6));
+  original.close();
+
+  handset.online();
+  await handset.api.logout();
+  const second = await handset.api.login(SECOND_EMAIL, PASSWORD);
+  assert.notEqual(second.uid, first.uid);
+  const secondSync = handset.sync(second.uid);
+  await secondSync.refresh();
+  assert.deepEqual(secondSync.load().data, null);
+  assert.equal(secondSync.load().revision, 0);
+  await secondSync.flush();
+  assert.equal(handset.sent.length, 1, 'old draft must not be uploaded for second identity');
+
+  secondSync.edit(snapshot(8));
+  await secondSync.flush();
+  assert.equal(secondSync.load().revision, 1);
+  assert.deepEqual((await handset.api.getWorklog()).data, snapshot(8));
+
+  const oldCache = JSON.parse(handset.disk.getItem('worklog.yandex.test.v1:' + first.uid));
+  assert.deepEqual(oldCache.data, snapshot(6));
+  assert.equal(oldCache.pending.expectedRevision, 1);
+  const secondCache = JSON.parse(handset.disk.getItem('worklog.yandex.test.v1:' + second.uid));
+  assert.deepEqual(secondCache.data, snapshot(8));
+  assert.equal(secondCache.pending, null);
+
+  const otherHandset = device(rpc);
+  await otherHandset.api.login(EMAIL, PASSWORD);
+  assert.deepEqual(await otherHandset.api.getWorklog(), {data: snapshot(2), revision: 1});
+  assert.deepEqual(handset.sent.map(write => write.data), [snapshot(2), snapshot(8)]);
+});
+
+test('an in-flight read from the prior user is rejected after an account switch', async t => {
+  const rpc = bridge(t);
+  let signalStarted, releaseOldRead;
+  const started = new Promise(resolve => {signalStarted = resolve;});
+  const delayed = new Promise(resolve => {releaseOldRead = resolve;});
+  t.after(() => releaseOldRead());
+  let hold = true;
+
+  const fetch = async (url, opts) => {
+    const path = new URL(url).pathname;
+    const payload = await rpc({
+      op: 'http', path, method: opts.method,
+      headers: opts.headers, body: opts.body
+    });
+    if(path === '/me/worklog' && opts.method === 'GET' && hold) {
+      hold = false;
+      signalStarted();
+      await delayed;
+    }
+    return Response.json(payload.body, {status: payload.statusCode});
+  };
+  const api = createApi({baseUrl: BASE, fetch});
+  const first = await api.login(EMAIL, PASSWORD);
+  const pendingOldRead = api.getWorklog();
+  await started;
+  const second = await api.login(SECOND_EMAIL, PASSWORD);
+  assert.notEqual(second.uid, first.uid);
+
+  releaseOldRead();
+  await assert.rejects(pendingOldRead, error => error?.code === 'session_changed');
+  assert.deepEqual(await api.getWorklog(), {data: null, revision: 0});
+});
