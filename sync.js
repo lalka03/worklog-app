@@ -20,6 +20,34 @@
       Object.prototype.hasOwnProperty.call(right,key) && sameSnapshot(left[key],right[key]));
   }
 
+  const record = value=>value!==null && typeof value==='object' && !Array.isArray(value);
+  const validSnapshot = value=>record(value) && accounts.validateWorklog(value);
+  const validPending = value=>value===null || (record(value) &&
+    validSnapshot(value.data) &&
+    (value.expectedRevision===null || validRevision(value.expectedRevision)) &&
+    typeof value.mutationId==='string' && /^[A-Za-z0-9_-]{1,128}$/.test(value.mutationId) &&
+    typeof value.sent==='boolean' && (!value.sent || validRevision(value.expectedRevision)) &&
+    (value.next==null || validSnapshot(value.next)) &&
+    (value.blocked===undefined || ['invalid_worklog','worklog_too_large'].includes(value.blocked)));
+  const validConflict = value=>value===null || (record(value) &&
+    validSnapshot(value.local) && (value.server===null || validSnapshot(value.server)) &&
+    (value.revision===null || validRevision(value.revision)) &&
+    ['unknown_revision','stale_revision','mutation_mismatch'].includes(value.reason) &&
+    typeof value.resolved==='boolean');
+  function parseCache(raw){
+    const saved=JSON.parse(raw);
+    if(!record(saved) || !('data' in saved) || !('revision' in saved) ||
+       (saved.revision!==null && !validRevision(saved.revision)) ||
+       (saved.data!==null && !validSnapshot(saved.data)) ||
+       !validPending(saved.pending===undefined?null:saved.pending) ||
+       !validConflict(saved.conflict===undefined?null:saved.conflict)){
+      throw new Error('Invalid Worklog local cache');
+    }
+    return {data:saved.data,revision:saved.revision,
+      pending:saved.pending===undefined?null:saved.pending,
+      conflict:saved.conflict===undefined?null:saved.conflict};
+  }
+
   // Older caches may contain a follow-up with the same content as the sent data.
   const followUp = ({data,next})=>next && !sameSnapshot(data,next)?next:null;
 
@@ -27,16 +55,14 @@
     const scope = accounts.userScope({uid});
     if(!scope) throw new Error('Invalid worklog account');
     const empty = {data:null,revision:null,pending:null,conflict:null};
-    let stored=empty, error=null, closed=false, running=null;
+    let stored=empty, error=null, closed=false, running=null, cacheUnsafe=false;
     try {
-      const raw = storage.getItem(scope.cache);
+      const raw=storage.getItem(scope.cache);
       if(raw){
-        const saved=JSON.parse(raw);
-        if(!saved || (saved.revision!==null && !validRevision(saved.revision)) ||
-           (saved.data!==null && !accounts.validateWorklog(saved.data))) throw new Error('Invalid worklog cache');
-        stored=saved;
+        try {stored=parseCache(raw);}
+        catch(e){cacheUnsafe=true;error='cache_corrupt';}
       }
-    } catch(e){error='storage';}
+    } catch(e){cacheUnsafe=true;error='cache_unreadable';}
 
     function load(){return {...copy(stored),error:error||stored.pending?.blocked||null};}
 
@@ -49,7 +75,7 @@
     }
 
     function save(change){
-      if(closed) return false;
+      if(closed || cacheUnsafe) return false;
       // Commit the snapshot, pending write and recovery draft together.
       const updated = {...stored,...change};
       try {storage.setItem(scope.cache,JSON.stringify(updated));}
@@ -65,7 +91,7 @@
     }
 
     function edit(data){
-      if(closed) return false;
+      if(closed || cacheUnsafe) return false;
       const {version,settings,days}=data;
       if(!accounts.validateWorklog({version,settings,days})){setError('invalid_worklog'); return false;}
       const local=snapshot(data);
@@ -156,7 +182,7 @@
     }
 
     function run(operation){
-      if(closed) return Promise.resolve();
+      if(closed || cacheUnsafe) return Promise.resolve();
       if(running) return running;
       // Hold the shared slot before starting callbacks that may synchronously call back into this object.
       running=Promise.resolve().then(()=>{if(!closed) return operation();})
@@ -167,7 +193,7 @@
     async function resolveConflict(choice){
       if(choice!=='server' && choice!=='retry-local') throw new Error('Invalid conflict recovery choice');
       if(running) await running;
-      if(closed || !stored.conflict || stored.conflict.resolved) return;
+      if(closed || cacheUnsafe || !stored.conflict || stored.conflict.resolved) return;
       return run(async()=>{
         if(!await updateConflict() || closed) return;
         const draft=stored.conflict;
@@ -179,7 +205,27 @@
       });
     }
 
-    return {load,edit,flush:()=>run(flushPending),refresh:()=>run(refreshServer),resolveConflict,close:()=>{closed=true;}};
+    // Never delete, clear or overwrite an unreadable/malformed cache automatically.
+    // Retrying reads is safe: a valid record can be reloaded after a transient
+    // storage fault or external, user-controlled restoration of a backup.
+    function retryCache(){
+      if(closed) return false;
+      if(!cacheUnsafe) return true;
+      let raw;
+      try {raw=storage.getItem(scope.cache);}
+      catch(e){setError('cache_unreadable');return false;}
+      if(!raw){setError('cache_unreadable');return false;}
+      let recovered;
+      try {recovered=parseCache(raw);}
+      catch(e){setError('cache_corrupt');return false;}
+      stored=recovered;
+      cacheUnsafe=false;
+      error=null;
+      announce();
+      return true;
+    }
+
+    return {load,edit,retryCache,flush:()=>run(flushPending),refresh:()=>run(refreshServer),resolveConflict,close:()=>{closed=true;}};
   }
 
   return {create};
