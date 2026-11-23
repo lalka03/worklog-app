@@ -28,7 +28,7 @@ def nonnegative_int(value):
     return None
 
 
-def check_target(target_id, info):
+def check_target(target_id, info, cloud_id):
     if not isinstance(target_id, str) or not re.fullmatch(r"[a-z0-9]{20}", target_id):
         return "INVALID_TARGET_ID_STOP"
     if target_id == SOURCE_ID:
@@ -58,13 +58,15 @@ def check_target(target_id, info):
         return "RU_LIMIT_STOP"
     if reserved != 0:
         return "RESERVED_PAID_CAPACITY_STOP"
+    if not isinstance(cloud_id, str) or not re.fullmatch(r"[a-z0-9]{20}", cloud_id):
+        return "INVALID_CLOUD_ID_STOP"
     endpoint = info.get("endpoint")
     if not isinstance(endpoint, str):
         return "TARGET_ENDPOINT_STOP"
     try:
         parsed = urlsplit(endpoint)
         paths = parse_qs(parsed.query).get("database", [])
-        exact_path = "/ru-central1/" + FOLDER_ID + "/" + target_id
+        exact_path = "/ru-central1/" + cloud_id + "/" + target_id
         valid = (
             parsed.scheme == "grpcs" and parsed.hostname == "ydb.serverless.yandexcloud.net"
             and parsed.port == 2135 and parsed.username is None
@@ -95,11 +97,18 @@ def main(argv=None):
         if folder != FOLDER_ID:
             print("WRONG_FOLDER_STOP")
             return 1
+        parent = json.loads(subprocess.check_output(
+            ["yc", "resource-manager", "folder", "get", "--id", FOLDER_ID, "--format", "json"],
+            text=True, stderr=subprocess.DEVNULL, timeout=20,
+        ))
+        if not isinstance(parent, dict) or parent.get("id") != FOLDER_ID:
+            print("WRONG_FOLDER_STOP")
+            return 1
         raw = subprocess.check_output(
             ["yc", "ydb", "database", "get", "--id", args.target_id, "--format", "json"],
             text=True, stderr=subprocess.DEVNULL, timeout=30,
         )
-        status = check_target(args.target_id, json.loads(raw))
+        status = check_target(args.target_id, json.loads(raw), parent.get("cloud_id"))
     except (OSError, ValueError, subprocess.SubprocessError):
         print("TARGET_READ_FAILED")
         return 1

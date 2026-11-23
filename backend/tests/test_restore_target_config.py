@@ -9,13 +9,17 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE = runpy.run_path(str(ROOT / "scripts/operator-restore-target-config-check.py"))
-check = MODULE["check_target"]
 main = MODULE["main"]
 
 FOLDER = "b1gbctisrf70nalca0ve"
 TARGET = "etn12345678901234567"
 SOURCE = "etntoapt41gu9i5u5blj"
-EXACT_PATH = "/ru-central1/" + FOLDER + "/" + TARGET
+CLOUD = "b1g00000000000000000"
+EXACT_PATH = "/ru-central1/" + CLOUD + "/" + TARGET
+
+
+def check(target_id, data):
+    return MODULE["check_target"](target_id, data, CLOUD)
 
 
 def healthy():
@@ -77,7 +81,8 @@ class TargetConfigTest(unittest.TestCase):
 
     def test_wrong_endpoint_never_accepted(self):
         for endpoint in [
-            "grpcs://ydb.serverless.yandexcloud.net:2135/?database=/ru-central1/" + FOLDER + "/" + SOURCE,
+            "grpcs://ydb.serverless.yandexcloud.net:2135/?database=/ru-central1/" + CLOUD + "/" + SOURCE,
+            "grpcs://ydb.serverless.yandexcloud.net:2135/?database=/ru-central1/" + FOLDER + "/" + TARGET,
             "grpcs://ydb.serverless.yandexcloud.net:2135/?database=/ru-central1/other/" + TARGET,
             "grpc://ydb.serverless.yandexcloud.net:2135/?database=" + EXACT_PATH,
             "grpcs://attacker.example:2135/?database=" + EXACT_PATH,
@@ -89,24 +94,38 @@ class TargetConfigTest(unittest.TestCase):
                 self.assertEqual(check(TARGET, {**healthy(), "endpoint": endpoint}),
                                  "TARGET_ENDPOINT_STOP")
 
-    def test_main_issues_only_two_read_operations_with_no_secrets_in_output(self):
+    def test_main_reads_profile_parent_and_target_with_no_secrets_in_output(self):
         calls = []
         def fake_command(argv, **kwargs):
             calls.append(argv)
             if argv[1:3] == ["config", "get"]:
                 return FOLDER + "\n"
+            if argv[1:4] == ["resource-manager", "folder", "get"]:
+                return json.dumps({"id": FOLDER, "cloud_id": CLOUD})
             if argv[1:4] == ["ydb", "database", "get"]:
                 return json.dumps(healthy())
             raise AssertionError("unexpected command")
         result = io.StringIO()
         with patch.object(MODULE["subprocess"], "check_output", side_effect=fake_command), contextlib.redirect_stdout(result):
             self.assertEqual(main(["--target-id", TARGET]), 0)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(calls[1], ["yc", "ydb", "database", "get", "--id", TARGET, "--format", "json"])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[1], ["yc", "resource-manager", "folder", "get", "--id", FOLDER, "--format", "json"])
+        self.assertEqual(calls[2], ["yc", "ydb", "database", "get", "--id", TARGET, "--format", "json"])
         self.assertIn("TARGET_LIMITS_VERIFIED_BILLING_NOT_VERIFIED", result.getvalue())
         self.assertIn("NO_RESTORE_PERFORMED", result.getvalue())
         self.assertNotIn(TARGET, result.getvalue())
         self.assertNotIn(FOLDER, result.getvalue())
+
+    def test_parent_information_is_required(self):
+        for value in [None, "", 1, "invalid"]:
+            with self.subTest(cloud_id=value):
+                self.assertEqual(MODULE["check_target"](TARGET, healthy(), value), "INVALID_CLOUD_ID_STOP")
+        with patch.object(MODULE["subprocess"], "check_output", side_effect=[
+            FOLDER, json.dumps({"id": "different-folder", "cloud_id": CLOUD})
+        ]) as query, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(main(["--target-id", TARGET]), 1)
+            self.assertEqual(query.call_count, 2)
+            self.assertEqual(output.getvalue().strip(), "WRONG_FOLDER_STOP")
 
     def test_main_never_queries_source_database_as_target(self):
         with patch.object(MODULE["subprocess"], "check_output") as query, contextlib.redirect_stdout(io.StringIO()):

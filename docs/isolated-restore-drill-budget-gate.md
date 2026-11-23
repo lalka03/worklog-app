@@ -41,7 +41,9 @@ from an authorized Cloud Shell. It does **not** create any database or restore a
 The script rejects missing/ambiguous metadata and verifies that the target is distinct
 from the existing source DB, is named `worklog-restore-qa-20261123`, belongs
 to the pilot folder, is RUNNING and Serverless, and has the exact target endpoint
-path. It demands `storage_size_limit` in (0, 1 GiB], `enable_throttling_rcu_limit=true`,
+path. It reads the parent cloud ID from the verified folder, then checks the
+endpoint path as `/ru-central1/<cloud-id>/<new-db-id>`. The database metadata
+must independently identify the approved folder. It demands `storage_size_limit` in (0, 1 GiB], `enable_throttling_rcu_limit=true`,
 `throttling_rcu_limit` in [1, 10] RU/s and `provisioned_rcu_limit=0`.
 **Do not confuse the two RU fields.** A throttling value without the enable flag
 does not impose a rate cap. Provisioned RU creates regular charges even without
