@@ -41,15 +41,22 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Stage reviewed pilot assets with synthetic-only QA account guard
-        env:
-          WORKLOG_API_BASE_URL: ${{ vars.WORKLOG_API_BASE_URL }}
+      - name: Stage offline-only memory lab (no Yandex endpoint)
         run: node scripts/stage-cache-qa-assets.cjs
-      - name: Verify staged guard exists before packaging
+      - name: Verify APK contains no login or network client
         run: |
-          test -f www/cache-qa-guard.js
-          grep -F 'cache-qa-guard.js' www/index.html
-          grep -F 'worklog.cache.qa.20261123@example.com' www/cache-qa-guard.js
+          set -euo pipefail
+          test -f www/cache-qa-lab.js
+          test -f www/account.js
+          test -f www/sync.js
+          test ! -e www/api.js
+          test ! -e www/cache-qa-guard.js
+          grep -F 'connect-src' www/index.html
+          grep -F 'cache-qa-lab.js' www/index.html
+          if grep -E 'WORKLOG_API_BASE_URL|auth/login|/me/worklog|fetch\(' www/cache-qa-lab.js www/index.html; then
+            echo 'Unexpected gateway or fetch use in offline lab'
+            exit 1
+          fi
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
