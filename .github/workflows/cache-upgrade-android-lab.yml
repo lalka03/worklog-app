@@ -63,11 +63,25 @@ jobs:
             "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk"
           done
           echo 'ANDROID_UPGRADE_TWO_QA_APKS_READY'
+      - name: Enable available KVM on isolated CI runner
+        shell: bash
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod a+rw /dev/kvm
+          fi
+          if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            echo 'ANDROID_EMULATOR_KVM_READY'
+          else
+            echo 'ANDROID_EMULATOR_TCG_FALLBACK'
+          fi
       - name: Verify WebView localStorage and Android Keystore after actual in-place emulator update
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_I_WANT_MY_TCG: 'yes'
         with:
           api-level: 34
           arch: x86_64
           profile: pixel_2
           disable-animations: true
+          emulator-boot-timeout: 900
           script: bash scripts/run-cache-upgrade-emulator.sh
