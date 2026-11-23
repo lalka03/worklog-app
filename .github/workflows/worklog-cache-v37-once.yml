@@ -1,0 +1,174 @@
+name: Worklog Yandex v37 cache protection signed APK (one-time build only)
+
+on:
+  push:
+    branches: [worklog-yandex-test]
+    paths: [.github/workflows/worklog-cache-v37-once.yml]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worklog-yandex-cache-v37-one-time-build
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.ref == 'refs/heads/worklog-yandex-test' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require one-time approved candidate and unchanged protected code
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = '90929964399b6dcf9eb26e6a2cf0779663348ed0'
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/worklog-cache-v37-once.yml'
+          test "$(git hash-object sync.js)" = '4e46042d50a5490b288effacdf05ae3b0392fcdf'
+          test "$(git hash-object index.html)" = 'cd11736292083c818c2e552c7c78659fad1654fd'
+          test "$(git hash-object account.js)" = '10ff04c87a3e482ddc35cac88673d3bfe527de6a'
+          test "$(git hash-object api.js)" = '9e8673f1614d2f1ba9d323f3b1aef06a0519ecf0'
+          test "$(git hash-object capacitor.config.json)" = 'd2dafe8957abd48d1ae4211a5c852e3d09e4c110'
+          git diff --exit-code d73eee4d55076362b6d914a12de9ea875e0cba32 HEAD^ -- api.js account.js capacitor.config.json native android backend
+          echo 'WORKLOG_V37_SOURCE_AND_IDENTITY_GATE_OK'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install backend dependencies
+        run: python -m pip install -r backend/requirements.txt
+      - name: Run complete local backend regression (hosted YDB excluded)
+        run: python -m unittest discover -s backend/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Run client, recovery and offline regression
+        run: npm test
+
+  signed-apk:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Stage approved HTTPS pilot origin and exact candidate assets
+        env:
+          WORKLOG_API_BASE_URL: ${{ vars.WORKLOG_API_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = '90929964399b6dcf9eb26e6a2cf0779663348ed0'
+          node scripts/stage-pilot-assets.cjs
+          python3 - <<'PY'
+          import hashlib, json, pathlib, re
+          source=pathlib.Path('index.html').read_text()
+          staged=pathlib.Path('www/index.html').read_text()
+          matches=re.findall(r'^const WORKLOG_API_BASE_URL = ("https://[^"]+");$',staged,re.M)
+          assert len(matches)==1,'Wrong HTTPS origin count'
+          origin=json.loads(matches[0])
+          assert hashlib.sha256(origin.encode()).hexdigest()=='364d32c49c82b5ebeea337070e0a5bebacd6e48d0b571d4bfe49c65e70c7fc0a', 'HTTPS endpoint differs from #36'
+          assert staged == source.replace("const WORKLOG_API_BASE_URL = '';",'const WORKLOG_API_BASE_URL = '+matches[0]+';'), 'Unexpected staged index'
+          for name in ['sync.js','api.js','account.js']:
+              assert pathlib.Path('www',name).read_bytes() == pathlib.Path(name).read_bytes(),'Unexpected asset '+name
+          assert sorted(f.name for f in pathlib.Path('www').iterdir()) == ['account.js','api.js','index.html','sync.js'],'Unexpected staged assets'
+          assert 'cache_corrupt' in staged and 'retryCache' in pathlib.Path('www/sync.js').read_text(), 'Cache protection absent'
+          cfg=json.loads(pathlib.Path('capacitor.config.json').read_text())
+          assert cfg['appId']=='com.worklog.app.yandex.test'
+          print('WORKLOG_V37_APPROVED_HTTPS_AND_ASSETS_OK (origin hidden)')
+          PY
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-34 build-tools;34.0.0
+      - name: Install Capacitor and add Android platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+          npx cap add android
+          node scripts/stage-android-session.cjs
+          npx cap sync android
+      - name: Configure existing trusted signing identity and fixed versionCode 37
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "$KEYSTORE_BASE64"
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > android/app/worklog-release.p12
+          test -s android/app/worklog-release.p12
+          cat >> android/app/build.gradle <<'EOF'
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file(System.getenv("KEYSTORE_FILE"))
+                      storePassword System.getenv("KEYSTORE_PASSWORD")
+                      keyAlias System.getenv("KEY_ALIAS")
+                      keyPassword System.getenv("KEY_PASSWORD")
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+              defaultConfig {
+                  versionCode 37
+              }
+          }
+          EOF
+      - name: Assemble signed release APK versionCode 37 (artifact only; never install/deploy)
+        env:
+          KEYSTORE_FILE: ${{ github.workspace }}/android/app/worklog-release.p12
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleRelease
+      - name: Inspect package, release cert and packed exact web assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          test -s "$APK"
+          BADGING="$("$ANDROID_HOME/build-tools/34.0.0/aapt" dump badging "$APK")"
+          printf '%s\n' "$BADGING" | grep -F "package: name='com.worklog.app.yandex.test' versionCode='37'"
+          SIGNATURE="$("$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose --print-certs "$APK")"
+          printf '%s\n' "$SIGNATURE" | grep -F 'Verified using v2 scheme (APK Signature Scheme v2): true'
+          printf '%s\n' "$SIGNATURE" | grep -Fi 'Signer #1 certificate SHA-256 digest: 6ae87ad6e78679209f126ff3708a859bc52389fb90c4cc1b46ccbb5bfedd3ec6'
+          python3 - <<'PY'
+          import hashlib, pathlib, re, zipfile
+          apk=pathlib.Path('android/app/build/outputs/apk/release/app-release.apk')
+          with zipfile.ZipFile(apk) as z:
+              for name in ['index.html','sync.js','account.js','api.js']:
+                  assert z.read('assets/public/'+name)==pathlib.Path('www',name).read_bytes(),'Packed asset mismatch: '+name
+              html=z.read('assets/public/index.html').decode()
+              m=re.findall(r'^const WORKLOG_API_BASE_URL = "(https://[^"]+)";$',html,re.M)
+              assert len(m)==1
+              assert hashlib.sha256(m[0].encode()).hexdigest()=='364d32c49c82b5ebeea337070e0a5bebacd6e48d0b571d4bfe49c65e70c7fc0a'
+              assert 'cache_corrupt' in html
+          print('WORKLOG_V37_SIGNED_APK_ORIGIN_AND_CACHE_GATES_OK (no user data)')
+          PY
+          sha256sum "$APK"
+      - name: Upload independently verifiable APK only (no device installation)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorklogYandexTest-cache-protection-v37-signed
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
