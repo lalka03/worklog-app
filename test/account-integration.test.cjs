@@ -846,3 +846,40 @@ test('full local storage prevents a false save and server upload until space is 
   assert.equal(h.records.get(alpha).data.days['2026-11-23'].main.hours,attempted.main.hours);
   assert.equal(h.run('sync.load().error'),null);
 });
+
+
+test('malformed saved worklog stays untouched and shows a specific warning instead of silently syncing', async () => {
+  const key='worklog.yandex.test.v1:'+alpha;
+  const cached=new Map([[key,'{"data":"truncated"']]);
+  const h=appHarness({cached});
+  await h.login('alpha');
+  h.run('originalRender()');
+  assert.equal(h.run('sync.load().error'),'cache_corrupt');
+  assert.equal(h.element('syncRefresh').textContent,'Повторить чтение');
+  assert.match(h.element('syncStatus').textContent,/Повреждена локальная копия/);
+  assert.match(h.element('syncStatus').textContent,/Не очищайте данные приложения/);
+  assert.equal(h.run("saveDB({...DB,days:{'2026-11-23':{date:'2026-11-23'}}})"),false);
+  await h.run('sync.refresh()');
+  assert.equal(cached.get(key),'{"data":"truncated"');
+  assert.equal(h.calls.some(call=>call.method==='PUT'),false);
+  await h.element('syncRefresh').click();
+  assert.equal(cached.get(key),'{"data":"truncated"');
+});
+
+test('retry read after storage recovery reuses the original cached pending mutation', async () => {
+  const key='worklog.yandex.test.v1:'+alpha;
+  const cached=new Map([[key,'{damaged']]);
+  const h=appHarness({cached});
+  await h.login('alpha');
+  const saved=h.run("({...DB,days:{'2026-11-23':{date:'2026-11-23',main:{hours:3,route:1}}}})");
+  const mutationId='a'.repeat(32);
+  cached.set(key,JSON.stringify({data:saved,revision:0,conflict:null,
+    pending:{data:saved,expectedRevision:0,mutationId,sent:false,next:null}}));
+  h.element('syncRefresh').click();
+  assert.equal(h.run('sync.load().error'),null);
+  assert.equal(h.run('sync.load().pending.mutationId'),mutationId);
+  await h.run('sync.flush()');
+  assert.equal(h.records.get(alpha).revision,1);
+  assert.equal(h.records.get(alpha).data.days['2026-11-23'].main.hours,3);
+  assert.equal(h.run('sync.load().pending'),null);
+});
