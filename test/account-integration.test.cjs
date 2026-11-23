@@ -883,3 +883,32 @@ test('retry read after storage recovery reuses the original cached pending mutat
   assert.equal(h.records.get(alpha).data.days['2026-11-23'].main.hours,3);
   assert.equal(h.run('sync.load().pending'),null);
 });
+
+
+test('damaged local cache cannot produce a misleading empty JSON export', async () => {
+  const key='worklog.yandex.test.v1:'+alpha;
+  const cached=new Map([[key,'{"data":"broken"']]);
+  const h=appHarness({cached});
+  await h.login('alpha');
+  h.run("setTab('settings');originalRender()");
+  const files=[];
+  h.ctx.window.Capacitor={isNativePlatform:()=>true,isPluginAvailable:()=>true,Plugins:{
+    Filesystem:{writeFile:async body=>{files.push(JSON.parse(body.data));return {uri:'file:///synthetic.json'};}},
+    Share:{share:async()=>{}}
+  }};
+  const button=h.element('expBtn');
+  await button.onclick({currentTarget:button});
+  assert.equal(files.length,0);
+  assert.equal(h.run('sync.load().error'),'cache_corrupt');
+  assert.equal(cached.get(key),'{"data":"broken"');
+
+  const recovered=h.run("({...DB,days:{'2026-11-23':{date:'2026-11-23',main:{hours:3,route:1}}}})");
+  cached.set(key,JSON.stringify({data:recovered,revision:0,conflict:null,
+    pending:{data:recovered,expectedRevision:0,mutationId:'c'.repeat(32),sent:false,next:null}}));
+  h.element('syncRefresh').click();
+  await h.run('sync.flush()');
+  assert.equal(h.run('sync.load().error'),null);
+  await button.onclick({currentTarget:button});
+  assert.equal(files.length,1);
+  assert.equal(files[0].days['2026-11-23'].main.hours,3);
+});
