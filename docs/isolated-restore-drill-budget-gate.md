@@ -30,3 +30,33 @@
 5. Record exact creation resource ID, test evidence, costs, cleanup and rollback in the private Worklog checkpoint.
 
 Notes: a successful in-memory backup restore test is already covered in `test_reliability_qa.py`; no YDB hosted restore acceptance has yet been performed.
+
+
+## Post-provisioning identity and cost-parameter check (read-only)
+
+After **separate approval** and manual creation of exactly one temporary restore database,
+use `scripts/operator-restore-target-config-check.py --target-id <new-db-ID>`
+from an authorized Cloud Shell. It does **not** create any database or restore any data.
+
+The script rejects missing/ambiguous metadata and verifies that the target is distinct
+from the existing source DB, is named `worklog-restore-qa-20261123`, belongs
+to the pilot folder, is RUNNING and Serverless, and has the exact target endpoint
+path. It demands `storage_size_limit` in (0, 1 GiB], `enable_throttling_rcu_limit=true`,
+`throttling_rcu_limit` in [1, 10] RU/s and `provisioned_rcu_limit=0`.
+**Do not confuse the two RU fields.** A throttling value without the enable flag
+does not impose a rate cap. Provisioned RU creates regular charges even without
+requests. 10 RU/s is an initial cap only and may be too restrictive to complete a
+hosted restore quickly; verify whether the actual restore can run within this cap
+before approving the resource. See Yandex Cloud
+[Serverless database fields](https://yandex.cloud/ru/docs/ydb/api-ref/Database/get)
+and [CLI parameter definitions](https://yandex.cloud/ru/docs/ydb/cli-ref/database/update).
+
+An accepted read-only result is `TARGET_LIMITS_VERIFIED_BILLING_NOT_VERIFIED`
+plus `NO_RESTORE_PERFORMED`. These markers **do not** certify an actual billing
+cap, available free quota, least-privilege IAM, absence of existing app bindings,
+or that any restore has been performed. Do not start a restore until those matters
+are separately confirmed. All errors stop; never "fix" cloud settings automatically.
+
+**Implementation status:** tests for this preflight and its refusal paths are in
+`backend/tests/test_restore_target_config.py`. It has not been run against the
+owner's cloud and must not be interpreted as a deployed change.
