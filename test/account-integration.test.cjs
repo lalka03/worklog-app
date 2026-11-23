@@ -820,3 +820,95 @@ test('active token-only remembered account locks its draft until automatic onlin
   assert.equal(h.run('activeUser.uid'),alpha);
   assert.ok(h.records.get(alpha).data.days['2026-11-20']);
 });
+
+
+test('full local storage prevents a false save and server upload until space is available', async () => {
+  const h=appHarness();
+  await h.login('alpha');
+  const attempted={
+    date:'2026-11-23',
+    main:{hours:'3',route:1}
+  };
+  const initialDays=h.run('Object.keys(DB.days)');
+  const initialWrites=h.calls.filter(call=>call.method==='PUT').length;
+  const originalSet=h.ctx.localStorage.setItem;
+  h.ctx.localStorage.setItem=()=>{throw new Error('synthetic storage quota exceeded');};
+
+  assert.equal(h.run('saveDB({...DB,days:{...DB.days,"2026-11-23":{date:"2026-11-23",main:{hours:"3",route:1}}}})'),false);
+  assert.equal(h.run('sync.load().error'),'storage');
+  assert.deepEqual(h.run('Object.keys(DB.days)'),initialDays);
+  await h.run('sync.flush()');
+  assert.equal(h.calls.filter(call=>call.method==='PUT').length,initialWrites);
+
+  h.ctx.localStorage.setItem=originalSet;
+  assert.equal(h.run('saveDB({...DB,days:{...DB.days,"2026-11-23":{date:"2026-11-23",main:{hours:"3",route:1}}}})'),true);
+  await h.run('sync.flush()');
+  assert.equal(h.records.get(alpha).data.days['2026-11-23'].main.hours,attempted.main.hours);
+  assert.equal(h.run('sync.load().error'),null);
+});
+
+
+test('malformed saved worklog stays untouched and shows a specific warning instead of silently syncing', async () => {
+  const key='worklog.yandex.test.v1:'+alpha;
+  const cached=new Map([[key,'{"data":"truncated"']]);
+  const h=appHarness({cached});
+  await h.login('alpha');
+  h.run('originalRender()');
+  assert.equal(h.run('sync.load().error'),'cache_corrupt');
+  assert.equal(h.element('syncRefresh').textContent,'Повторить чтение');
+  assert.match(h.element('syncStatus').textContent,/Повреждена локальная копия/);
+  assert.match(h.element('syncStatus').textContent,/Не очищайте данные приложения/);
+  assert.equal(h.run("saveDB({...DB,days:{'2026-11-23':{date:'2026-11-23'}}})"),false);
+  await h.run('sync.refresh()');
+  assert.equal(cached.get(key),'{"data":"truncated"');
+  assert.equal(h.calls.some(call=>call.method==='PUT'),false);
+  await h.element('syncRefresh').click();
+  assert.equal(cached.get(key),'{"data":"truncated"');
+});
+
+test('retry read after storage recovery reuses the original cached pending mutation', async () => {
+  const key='worklog.yandex.test.v1:'+alpha;
+  const cached=new Map([[key,'{damaged']]);
+  const h=appHarness({cached});
+  await h.login('alpha');
+  const saved=h.run("({...DB,days:{'2026-11-23':{date:'2026-11-23',main:{hours:3,route:1}}}})");
+  const mutationId='a'.repeat(32);
+  cached.set(key,JSON.stringify({data:saved,revision:0,conflict:null,
+    pending:{data:saved,expectedRevision:0,mutationId,sent:false,next:null}}));
+  h.element('syncRefresh').click();
+  assert.equal(h.run('sync.load().error'),null);
+  assert.equal(h.run('sync.load().pending.mutationId'),mutationId);
+  await h.run('sync.flush()');
+  assert.equal(h.records.get(alpha).revision,1);
+  assert.equal(h.records.get(alpha).data.days['2026-11-23'].main.hours,3);
+  assert.equal(h.run('sync.load().pending'),null);
+});
+
+
+test('damaged local cache cannot produce a misleading empty JSON export', async () => {
+  const key='worklog.yandex.test.v1:'+alpha;
+  const cached=new Map([[key,'{"data":"broken"']]);
+  const h=appHarness({cached});
+  await h.login('alpha');
+  h.run("setTab('settings');originalRender()");
+  const files=[];
+  h.ctx.window.Capacitor={isNativePlatform:()=>true,isPluginAvailable:()=>true,Plugins:{
+    Filesystem:{writeFile:async body=>{files.push(JSON.parse(body.data));return {uri:'file:///synthetic.json'};}},
+    Share:{share:async()=>{}}
+  }};
+  const button=h.element('expBtn');
+  await button.onclick({currentTarget:button});
+  assert.equal(files.length,0);
+  assert.equal(h.run('sync.load().error'),'cache_corrupt');
+  assert.equal(cached.get(key),'{"data":"broken"');
+
+  const recovered=h.run("({...DB,days:{'2026-11-23':{date:'2026-11-23',main:{hours:3,route:1}}}})");
+  cached.set(key,JSON.stringify({data:recovered,revision:0,conflict:null,
+    pending:{data:recovered,expectedRevision:0,mutationId:'c'.repeat(32),sent:false,next:null}}));
+  h.element('syncRefresh').click();
+  await h.run('sync.flush()');
+  assert.equal(h.run('sync.load().error'),null);
+  await button.onclick({currentTarget:button});
+  assert.equal(files.length,1);
+  assert.equal(files[0].days['2026-11-23'].main.hours,3);
+});
