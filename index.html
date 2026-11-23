@@ -367,6 +367,8 @@ function renderSyncStatus(){
   const blocked=pending?.blocked;
   const offline=disconnected || api.isOffline() || navigator.onLine===false;
   const messages={storage:'Не удалось сохранить данные на устройстве.',invalid_worklog:'Данные не прошли проверку.',
+    cache_corrupt:'Повреждена локальная копия. Она сохранена без изменений. Не очищайте данные приложения.',
+    cache_unreadable:'Не удалось прочитать локальную копию. Она не перезаписана. Повторите чтение.',
     unconfigured:'Сервер приложения не настроен.'};
   document.getElementById('syncStatus').textContent=unresolved
     ? 'Есть изменения на другом устройстве. Ваш черновик сохранён.'
@@ -381,7 +383,9 @@ function renderSyncStatus(){
   document.getElementById('syncKeepServer').hidden=!unresolved;
   document.getElementById('syncRetryLocal').hidden=!unresolved;
   document.getElementById('syncExportDraft').hidden=!conflict && !blocked;
+  const retryCache=['cache_corrupt','cache_unreadable'].includes(error);
   document.getElementById('syncRefresh').hidden=!error || unresolved || !!blocked;
+  document.getElementById('syncRefresh').textContent=retryCache?'Повторить чтение':'Повторить синхронизацию';
 }
 async function recoverSync(choice){
   if(!sync || !syncAvailable()) return;
@@ -1023,7 +1027,16 @@ document.getElementById('syncExportDraft').onclick=event=>{
   const draft=syncState?.pending?.blocked?syncState.data:syncState?.conflict?.local;
   if(draft) return exportBackup(draft,event.currentTarget,'worklog_draft_');
 };
-document.getElementById('syncRefresh').onclick=()=>scheduleSync(0);
+document.getElementById('syncRefresh').onclick=()=>{
+  if(['cache_corrupt','cache_unreadable'].includes(syncState?.error)){
+    if(!sync?.retryCache()){
+      toast('Локальная копия пока недоступна. Не очищайте данные приложения.');
+      renderSyncStatus();
+      return;
+    }
+  }
+  scheduleSync(0);
+};
 function render(){
   if(!personalValid()) return;
   const app = document.getElementById('app');
@@ -1483,6 +1496,10 @@ function bindSettings(){
 }
 async function exportBackup(worklog,button,prefix='worklog_backup_'){
   if(!personalValid() || !activeUser) return;
+  if(['cache_corrupt','cache_unreadable'].includes(syncState?.error)){
+    toast('Локальная копия недоступна. Не создавайте пустой экспорт и не очищайте данные приложения.');
+    return;
+  }
   const current=session;
   if(button.disabled) return;
   button.disabled = true;
