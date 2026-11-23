@@ -1,0 +1,9 @@
+{
+  "appId": "com.worklog.app.yandex.offlineqa",
+  "appName": "Worklog Offline QA",
+  "webDir": "www",
+  "bundledWebRuntime": false,
+  "android": {
+    "allowMixedContent": false
+  }
+}
